@@ -1,0 +1,59 @@
+{
+  "name": "vite-plugin-stylewright",
+  "version": "0.0.1",
+  "description": "Edit a Svelte component's CSS live in the browser and save it straight back into the .svelte <style> block. A dev-only Vite plugin.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Greg Johnson",
+  "keywords": [
+    "vite-plugin",
+    "svelte",
+    "css",
+    "devtools",
+    "live-edit",
+    "inspector",
+    "hmr"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "magic-string": "^0.30.11",
+    "postcss": "^8.4.47"
+  },
+  "peerDependencies": {
+    "svelte": ">=4",
+    "vite": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "svelte": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "svelte": "^5.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.1"
+  }
+}
