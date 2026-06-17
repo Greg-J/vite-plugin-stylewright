@@ -62,5 +62,7 @@ export interface SwStyleSaveRequest {
 export interface SwStyleSaveResponse {
 	ok: boolean;
 	changed: boolean;
+	/** True when the CSS was rejected as incomplete/invalid (not written). */
+	invalid?: boolean;
 	error?: string;
 }

@@ -89,14 +89,39 @@ export function readStyle(source: string): { hasStyle: boolean; css: string } {
 }
 
 /**
+ * Is this CSS safe to write to a .svelte file? It must parse, and every
+ * declaration must have a non-empty value. This is the guard against persisting a
+ * mid-typing fragment (`font`, `color:`) that would break Svelte's compiler.
+ */
+export function isCompleteCss(css: string): boolean {
+	let root: postcss.Root;
+	try {
+		root = postcss.parse(css);
+	} catch {
+		return false;
+	}
+	let ok = true;
+	root.walkDecls((d) => {
+		if (!d.value || !d.value.trim()) ok = false;
+	});
+	return ok;
+}
+
+/**
  * Replace the entire inner CSS of a component's <style> block with `css`. Only the
  * bytes between <style> and </style> change — markup and script are untouched.
+ * Refuses to write CSS that wouldn't compile (returns `invalid: true` instead), so
+ * a half-typed declaration never breaks the dev server.
  */
-export function applyStyleBlock(source: string, css: string): { code: string; changed: boolean } {
+export function applyStyleBlock(
+	source: string,
+	css: string
+): { code: string; changed: boolean; invalid: boolean } {
 	const block = findStyleBlock(source);
-	if (!block) return { code: source, changed: false };
-	if (css === block.css) return { code: source, changed: false };
+	if (!block) return { code: source, changed: false, invalid: false };
+	if (css === block.css) return { code: source, changed: false, invalid: false };
+	if (!isCompleteCss(css)) return { code: source, changed: false, invalid: true };
 	const ms = new MagicString(source);
 	ms.overwrite(block.start, block.end, css);
-	return { code: ms.toString(), changed: true };
+	return { code: ms.toString(), changed: true, invalid: false };
 }

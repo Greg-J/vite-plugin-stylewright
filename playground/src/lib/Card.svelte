@@ -11,9 +11,9 @@
 	.card {
 		background: #eee;
 		border: 1px solid #e3e3e3;
-		border-radius: 10px;
+		border-radius: 12px;
 		padding: 24px;
-		box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.2);
+		box-shadow: 0 8px 24px -12px #8f2424;
 	}
 	.title {
 		margin: 0 0 8px;
