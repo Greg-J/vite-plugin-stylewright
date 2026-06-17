@@ -9,12 +9,6 @@ import type { SwRule, SwRulesResponse, SwEditResponse } from '../shared/protocol
 
 const PREFIX = '/__stylewright';
 
-// Guard against double-injection (HMR can re-run the inject).
-if (!(window as any).__stylewright__) {
-	(window as any).__stylewright__ = true;
-	boot();
-}
-
 interface SvelteLoc {
 	file: string;
 	line?: number;
@@ -286,3 +280,10 @@ const TEMPLATE = /* html */ `
 	<div class="rules"></div>
 </div>
 `;
+
+// Boot once — AFTER all module constants (TEMPLATE, previews, …) are initialized.
+// Guarded so an HMR re-inject doesn't stack a second overlay.
+if (!(window as any).__stylewright__) {
+	(window as any).__stylewright__ = true;
+	boot();
+}
