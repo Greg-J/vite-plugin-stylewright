@@ -1,0 +1,19 @@
+{
+  "name": "stylewright-playground",
+  "private": true,
+  "type": "module",
+  "description": "Runnable Svelte 5 demo for vite-plugin-stylewright.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vite-plugin-stylewright": "file:.."
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "svelte": "^5.0.0",
+    "vite": "^5.4.0"
+  }
+}
