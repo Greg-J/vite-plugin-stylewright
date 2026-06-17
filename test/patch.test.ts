@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyEdit, readRules } from '../src/server/patch.js';
+import { applyEdit, readRules, readStyle, applyStyleBlock } from '../src/server/patch.js';
 import { findStyleBlock } from '../src/server/locate.js';
 
 const SAMPLE = `<script>
@@ -88,5 +88,39 @@ describe('applyEdit', () => {
 		const res = applyEdit('<p>hi</p>', { file: 'X.svelte', selector: '.btn', prop: 'color', value: 'red' });
 		expect(res.changed).toBe(false);
 		expect(res.matched).toBe(false);
+	});
+});
+
+describe('readStyle', () => {
+	it('returns the raw inner CSS of the <style>', () => {
+		const { hasStyle, css } = readStyle(SAMPLE);
+		expect(hasStyle).toBe(true);
+		expect(css).toBe(findStyleBlock(SAMPLE)!.css);
+		expect(css).toContain('.btn {');
+	});
+
+	it('hasStyle:false when there is no <style>', () => {
+		expect(readStyle('<p>x</p>').hasStyle).toBe(false);
+	});
+});
+
+describe('applyStyleBlock', () => {
+	it('replaces the whole <style> body, leaving markup + script intact', () => {
+		const res = applyStyleBlock(SAMPLE, '\n  .btn { color: rebeccapurple; }\n');
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('color: rebeccapurple;');
+		expect(res.code).toContain('let count = 0;');
+		expect(res.code).toContain('<button class="btn"');
+		// the whole block was replaced, so the old declarations are gone
+		expect(res.code).not.toContain('padding: 8px 14px;');
+	});
+
+	it('is a no-op when the css is identical', () => {
+		const same = findStyleBlock(SAMPLE)!.css;
+		expect(applyStyleBlock(SAMPLE, same).changed).toBe(false);
+	});
+
+	it('no <style> -> no change', () => {
+		expect(applyStyleBlock('<p>x</p>', '.a { color: red; }').changed).toBe(false);
 	});
 });
