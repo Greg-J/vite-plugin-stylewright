@@ -112,8 +112,8 @@ function boot(): void {
 			const data = (await res.json()) as SwStyleResponse;
 			if (data.error) return setStatus(data.error, 'err');
 			if (!data.hasStyle) return setStatus('This component has no <style> block.', 'info');
-			setStatus('Scroll a number to scrub it · click a swatch to pick a color', 'info');
-			editor = createEditor(editorEl, root, data.css, (css) => void saveStyle(css));
+			setStatus('Editing — changes save as you type', 'info');
+			editor = createEditor(editorEl, data.css, (css) => void saveStyle(css));
 		} catch (err) {
 			setStatus(`Failed to load: ${String(err)}`, 'err');
 		}
@@ -178,6 +178,12 @@ const TEMPLATE = /* html */ `
 	.status[data-kind="ok"] { color: #1a7f4b; }
 	.status[data-kind="err"] { color: #c0392b; }
 	.editor { overflow: hidden; }
+	.sw-textarea {
+		display: block; width: 100%; height: 280px; box-sizing: border-box; resize: vertical;
+		border: 0; outline: none; padding: 10px 12px; margin: 0;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+		color: #15202b; background: #fff; tab-size: 2;
+	}
 </style>
 <button class="fab" title="Stylewright — pick an element to edit its CSS">✎</button>
 <div class="panel">
