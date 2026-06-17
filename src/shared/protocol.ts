@@ -42,3 +42,25 @@ export interface SwEditResponse {
 	matched: boolean;
 	error?: string;
 }
+
+/** Response to `GET /__stylewright/style?file=<path>` — the whole-<style> editor model. */
+export interface SwStyleResponse {
+	file: string;
+	hasStyle: boolean;
+	/** Raw inner CSS of the component's <style> block. */
+	css: string;
+	error?: string;
+}
+
+/** Body of `POST /__stylewright/style`. */
+export interface SwStyleSaveRequest {
+	file: string;
+	css: string;
+}
+
+/** Response to `POST /__stylewright/style`. */
+export interface SwStyleSaveResponse {
+	ok: boolean;
+	changed: boolean;
+	error?: string;
+}

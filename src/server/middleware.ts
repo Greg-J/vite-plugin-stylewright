@@ -12,8 +12,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readRules, applyEdit } from './patch.js';
-import type { SwRulesResponse, SwEditRequest, SwEditResponse } from '../shared/protocol.js';
+import { readRules, applyEdit, readStyle, applyStyleBlock } from './patch.js';
+import type {
+	SwRulesResponse,
+	SwEditRequest,
+	SwEditResponse,
+	SwStyleResponse,
+	SwStyleSaveRequest
+} from '../shared/protocol.js';
 
 const PREFIX = '/__stylewright';
 
@@ -107,6 +113,48 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 			} catch (err) {
 				const body: SwRulesResponse = { file, hasStyle: false, rules: [], error: String(err) };
 				return sendJson(res, 500, body);
+			}
+		}
+
+		// --- read a component's whole <style> (code-editor model) ---
+		if (req.method === 'GET' && url.startsWith(`${PREFIX}/style`)) {
+			const q = new URL(url, 'http://localhost').searchParams;
+			const file = q.get('file') || '';
+			const abs = resolveSvelteFile(root, file);
+			if (!abs) {
+				const body: SwStyleResponse = { file, hasStyle: false, css: '', error: 'file not found in project' };
+				return sendJson(res, 404, body);
+			}
+			try {
+				const source = await readFile(abs, 'utf8');
+				const { hasStyle, css } = readStyle(source);
+				const body: SwStyleResponse = { file, hasStyle, css };
+				return sendJson(res, 200, body);
+			} catch (err) {
+				const body: SwStyleResponse = { file, hasStyle: false, css: '', error: String(err) };
+				return sendJson(res, 500, body);
+			}
+		}
+
+		// --- save a component's whole <style> ---
+		if (req.method === 'POST' && url.startsWith(`${PREFIX}/style`)) {
+			let save: SwStyleSaveRequest;
+			try {
+				save = JSON.parse(await readBody(req));
+			} catch {
+				return sendJson(res, 400, { ok: false, changed: false, error: 'invalid json' });
+			}
+			const abs = resolveSvelteFile(root, save?.file);
+			if (!abs || typeof save.css !== 'string') {
+				return sendJson(res, 400, { ok: false, changed: false, error: 'bad request' });
+			}
+			try {
+				const source = await readFile(abs, 'utf8');
+				const result = applyStyleBlock(source, save.css);
+				if (result.changed) await writeFile(abs, result.code, 'utf8');
+				return sendJson(res, 200, { ok: true, changed: result.changed });
+			} catch (err) {
+				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
 			}
 		}
 

@@ -80,3 +80,23 @@ export function applyEdit(source: string, edit: SwEditRequest): ApplyResult {
 	ms.overwrite(block.start, block.end, newCss);
 	return { code: ms.toString(), changed: true, matched };
 }
+
+/** Read the raw inner CSS of a component's <style> block (the code-editor model). */
+export function readStyle(source: string): { hasStyle: boolean; css: string } {
+	const block = findStyleBlock(source);
+	if (!block) return { hasStyle: false, css: '' };
+	return { hasStyle: true, css: block.css };
+}
+
+/**
+ * Replace the entire inner CSS of a component's <style> block with `css`. Only the
+ * bytes between <style> and </style> change — markup and script are untouched.
+ */
+export function applyStyleBlock(source: string, css: string): { code: string; changed: boolean } {
+	const block = findStyleBlock(source);
+	if (!block) return { code: source, changed: false };
+	if (css === block.css) return { code: source, changed: false };
+	const ms = new MagicString(source);
+	ms.overwrite(block.start, block.end, css);
+	return { code: ms.toString(), changed: true };
+}

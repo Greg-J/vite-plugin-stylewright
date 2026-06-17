@@ -24,6 +24,8 @@ export default defineConfig([
 		target: 'es2020',
 		clean: false,
 		dts: false,
-		minify: false
+		// Minified — this overlay is served to the browser, and it bundles CodeMirror,
+		// so we ship a realistic size (and can report it).
+		minify: true
 	}
 ]);
