@@ -63,23 +63,21 @@ function readBody(req: Connect.IncomingMessage): Promise<string> {
 	});
 }
 
-/** Lazily load + cache the prebuilt overlay bundle that sits next to this file. */
-let clientCache: string | null = null;
+/**
+ * Load the prebuilt overlay bundle that sits next to this file. Read fresh on
+ * every request (NOT cached) so a rebuilt overlay shows up on a plain browser
+ * refresh — no dev-server restart needed while iterating. The read is a single
+ * small file, only on full page loads, so the cost is negligible.
+ */
 function loadClient(): string {
-	if (clientCache != null) return clientCache;
 	const candidates = [
 		fileURLToPath(new URL('./client.global.js', import.meta.url)),
 		fileURLToPath(new URL('../dist/client.global.js', import.meta.url))
 	];
 	for (const p of candidates) {
-		if (existsSync(p)) {
-			clientCache = readFileSync(p, 'utf8');
-			return clientCache;
-		}
+		if (existsSync(p)) return readFileSync(p, 'utf8');
 	}
-	clientCache =
-		'console.warn("[stylewright] client bundle not found — run `npm run build` in the plugin.");';
-	return clientCache;
+	return 'console.warn("[stylewright] client bundle not found — run `npm run build` in the plugin.");';
 }
 
 export function createStylewrightMiddleware(root: string): Connect.NextHandleFunction {
