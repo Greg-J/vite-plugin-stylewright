@@ -150,7 +150,7 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 				const source = await readFile(abs, 'utf8');
 				const result = applyStyleBlock(source, save.css);
 				if (result.changed) await writeFile(abs, result.code, 'utf8');
-				return sendJson(res, 200, { ok: true, changed: result.changed });
+				return sendJson(res, 200, { ok: true, changed: result.changed, invalid: result.invalid });
 			} catch (err) {
 				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
 			}

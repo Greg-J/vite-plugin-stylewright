@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyEdit, readRules, readStyle, applyStyleBlock } from '../src/server/patch.js';
+import { applyEdit, readRules, readStyle, applyStyleBlock, isCompleteCss } from '../src/server/patch.js';
 import { findStyleBlock } from '../src/server/locate.js';
 
 const SAMPLE = `<script>
@@ -122,5 +122,26 @@ describe('applyStyleBlock', () => {
 
 	it('no <style> -> no change', () => {
 		expect(applyStyleBlock('<p>x</p>', '.a { color: red; }').changed).toBe(false);
+	});
+
+	it('refuses to write incomplete CSS and flags it invalid', () => {
+		const res = applyStyleBlock(SAMPLE, '\n  .btn { font }\n');
+		expect(res.invalid).toBe(true);
+		expect(res.changed).toBe(false);
+		expect(res.code).toBe(SAMPLE);
+	});
+});
+
+describe('isCompleteCss', () => {
+	it('accepts complete declarations', () => {
+		expect(isCompleteCss('.a { color: red; padding: 8px 12px; }')).toBe(true);
+	});
+
+	it('rejects a bare property (mid-typing "font")', () => {
+		expect(isCompleteCss('.a { font }')).toBe(false);
+	});
+
+	it('rejects an empty value ("color:")', () => {
+		expect(isCompleteCss('.a { color: ; }')).toBe(false);
 	});
 });

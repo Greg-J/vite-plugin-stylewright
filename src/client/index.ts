@@ -129,6 +129,7 @@ function boot(): void {
 			});
 			const d = (await res.json()) as SwStyleSaveResponse;
 			if (!d.ok) setStatus(d.error || 'Save failed', 'err');
+			else if (d.invalid) setStatus('Incomplete CSS — not saved yet', 'info');
 			else if (d.changed) setStatus('Saved ✓', 'ok');
 			else setStatus('No change', 'info');
 		} catch (err) {
