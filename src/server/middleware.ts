@@ -98,7 +98,13 @@ export function createHtmlInjectMiddleware(): Connect.NextHandleFunction {
 		const origWriteHead = res.writeHead.bind(res);
 		const origWrite = res.write.bind(res);
 		const origEnd = res.end.bind(res) as (data?: string | Buffer, cb?: () => void) => ServerResponse;
-		const toBuf = (c: unknown): Buffer => (Buffer.isBuffer(c) ? c : Buffer.from(typeof c === 'string' ? c : String(c)));
+		const toBuf = (c: unknown): Buffer => {
+			if (Buffer.isBuffer(c)) return c;
+			if (typeof c === 'string') return Buffer.from(c);
+			if (c instanceof Uint8Array) return Buffer.from(c); // SvelteKit streams Uint8Array chunks
+			if (c instanceof ArrayBuffer) return Buffer.from(new Uint8Array(c));
+			return Buffer.from(String(c));
+		};
 		const lastCb = (a: unknown[]): (() => void) | undefined => (typeof a[a.length - 1] === 'function' ? (a[a.length - 1] as () => void) : undefined);
 
 		// SvelteKit calls writeHead(), which flushes headers immediately — too early to
