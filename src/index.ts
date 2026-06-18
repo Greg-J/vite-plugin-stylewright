@@ -1,5 +1,5 @@
 import type { Plugin } from 'vite';
-import { createStylewrightMiddleware } from './server/middleware.js';
+import { createStylewrightMiddleware, createHtmlInjectMiddleware } from './server/middleware.js';
 
 export interface StylewrightOptions {
 	/**
@@ -28,8 +28,13 @@ export default function stylewright(options: StylewrightOptions = {}): Plugin {
 		},
 		configureServer(server) {
 			if (!enabled) return;
+			// Inject the client by rewriting HTML responses (works under SvelteKit too,
+			// where transformIndexHtml is bypassed), then serve the API + bundle.
+			server.middlewares.use(createHtmlInjectMiddleware());
 			server.middlewares.use(createStylewrightMiddleware(root));
 		},
+		// Plain Vite path — clean inject via the index.html transform. The middleware
+		// above is idempotent, so this never results in a double injection.
 		transformIndexHtml() {
 			if (!enabled) return;
 			return [
