@@ -152,6 +152,13 @@ export function createHtmlInjectMiddleware(): Connect.NextHandleFunction {
 					}
 					const out = Buffer.from(html, 'utf8');
 					res.setHeader('content-length', String(out.length));
+					// We rewrote the body, so the upstream validators no longer match it.
+					// Drop them and forbid caching: a dev overlay must never let a stale
+					// (or previously-broken) page survive in the browser across a fix or a
+					// server restart — that turns a fixed bug into a "still broken" report.
+					res.removeHeader('etag');
+					res.removeHeader('last-modified');
+					res.setHeader('cache-control', 'no-store');
 					return origEnd(out, cb);
 				}
 			} catch { /* fall through */ }
