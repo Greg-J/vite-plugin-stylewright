@@ -5,7 +5,7 @@
 import postcss from 'postcss';
 import MagicString from 'magic-string';
 import { findStyleBlock } from './locate.js';
-import type { SwRule, SwEditRequest } from '../shared/protocol.js';
+import type { SwRule, SwAtRule, SwEditRequest } from '../shared/protocol.js';
 
 /** Collapse insignificant whitespace so source and runtime selectors compare equal. */
 function normalizeSelector(sel: string): string {
@@ -16,6 +16,23 @@ function normalizeSelector(sel: string): string {
  * Parse a component's <style> and return its rules as source selectors +
  * declarations. The overlay uses this to show what's editable.
  */
+/** The chain of at-rules enclosing `rule`, outermost first. */
+function atRuleChain(rule: postcss.Rule): SwAtRule[] {
+	const chain: SwAtRule[] = [];
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let p: any = rule.parent;
+	while (p && p.type === 'atrule') {
+		chain.unshift({ name: String(p.name), params: String(p.params).trim() });
+		p = p.parent;
+	}
+	return chain;
+}
+
+/** True for @keyframes / @-webkit-keyframes (and vendor variants). */
+function isKeyframesName(name: string): boolean {
+	return /(?:^|-)keyframes$/i.test(name);
+}
+
 export function readRules(source: string): { hasStyle: boolean; rules: SwRule[] } {
 	const block = findStyleBlock(source);
 	if (!block) return { hasStyle: false, rules: [] };
@@ -26,11 +43,23 @@ export function readRules(source: string): { hasStyle: boolean; rules: SwRule[] 
 		return { hasStyle: true, rules: [] };
 	}
 	const rules: SwRule[] = [];
+	let ordinal = 0;
 	root.walkRules((rule) => {
+		const id = ordinal++; // every rule gets a stable ordinal in walk order, even if not surfaced
+		const media = atRuleChain(rule);
+		// Don't surface @keyframes steps (0%, 50%, from/to) as editable selectors —
+		// they're animation frames, not styling rules. Their ordinal is still
+		// consumed so a targeted save's index stays aligned with walk order.
+		if (media.some((a) => isKeyframesName(a.name))) return;
 		const decls = rule.nodes
 			.filter((n): n is postcss.Declaration => n.type === 'decl')
 			.map((d) => ({ prop: d.prop, value: d.value }));
-		rules.push({ selector: normalizeSelector(rule.selector), decls });
+		rules.push({
+			id,
+			selector: normalizeSelector(rule.selector),
+			decls,
+			media: media.length ? media : undefined
+		});
 	});
 	return { hasStyle: true, rules };
 }
@@ -79,6 +108,92 @@ export function applyEdit(source: string, edit: SwEditRequest): ApplyResult {
 	const ms = new MagicString(source);
 	ms.overwrite(block.start, block.end, newCss);
 	return { code: ms.toString(), changed: true, matched };
+}
+
+export interface ApplyRulesResult {
+	code: string;
+	/** True when the file text actually changed. */
+	changed: boolean;
+	/** How many incoming rules were matched to a source rule by id. */
+	matched: number;
+}
+
+/**
+ * Structure-preserving save. Takes the editor's rule model (each rule carrying the
+ * stable `id` from readRules) and patches ONLY the matched rules' declarations back
+ * into the parsed source tree — so `@media`/`@keyframes`/`@supports`, comments, and
+ * every untouched rule are preserved exactly. This replaces the flat whole-block
+ * serialize (which flattened at-rules into top-level rules — silent data loss).
+ *
+ * Phase 1 patches existing rules' declarations only (the panel edits/adds/removes
+ * declarations within rules, never whole rules). Creating/removing rules — e.g. the
+ * "add a responsive override" affordance — comes later.
+ */
+export function applyRules(source: string, rules: SwRule[]): ApplyRulesResult {
+	const block = findStyleBlock(source);
+	if (!block) return { code: source, changed: false, matched: 0 };
+	let root: postcss.Root;
+	try {
+		root = postcss.parse(block.css);
+	} catch {
+		return { code: source, changed: false, matched: 0 };
+	}
+
+	// Map each surfaced rule's stable id (walk-order ordinal, skipping @keyframes
+	// steps) to its postcss node — mirrors readRules EXACTLY so the ids line up.
+	const idMap = new Map<number, postcss.Rule>();
+	let ordinal = 0;
+	root.walkRules((node) => {
+		const id = ordinal++;
+		if (atRuleChain(node).some((a) => isKeyframesName(a.name))) return;
+		idMap.set(id, node);
+	});
+
+	let changed = false;
+	let matched = 0;
+	for (const r of rules) {
+		if (typeof r.id !== 'number') continue; // Phase 1: patch existing rules only
+		const node = idMap.get(r.id);
+		if (!node) continue;
+		matched++;
+		if (reconcileDecls(node, r.decls)) changed = true;
+	}
+
+	if (!changed) return { code: source, changed: false, matched };
+	const newCss = root.toString();
+	if (newCss === block.css) return { code: source, changed: false, matched };
+	const ms = new MagicString(source);
+	ms.overwrite(block.start, block.end, newCss);
+	return { code: ms.toString(), changed: true, matched };
+}
+
+/**
+ * Make a rule node's declarations equal `desired`. Fast path — same properties in
+ * the same order — updates only the changed values in place, so the rest of the rule
+ * stays byte-for-byte (this is the common case: scrubbing a number, picking a color).
+ * Otherwise (a declaration added, removed, or reordered) it rebuilds the rule body.
+ * Empty/half-typed declarations are dropped. Returns whether anything changed.
+ */
+function reconcileDecls(node: postcss.Rule, desired: { prop: string; value: string }[]): boolean {
+	const want = desired
+		.filter((d) => d.prop.trim() && d.value.trim())
+		.map((d) => ({ prop: d.prop.trim(), value: d.value.trim() }));
+	const current = node.nodes.filter((n): n is postcss.Declaration => n.type === 'decl');
+
+	if (current.length === want.length && current.every((c, i) => c.prop === want[i].prop)) {
+		let changed = false;
+		current.forEach((c, i) => {
+			if (c.value !== want[i].value) {
+				c.value = want[i].value;
+				changed = true;
+			}
+		});
+		return changed;
+	}
+
+	node.removeAll();
+	for (const d of want) node.append({ prop: d.prop, value: d.value });
+	return true;
 }
 
 /** Read the raw inner CSS of a component's <style> block (the code-editor model). */
@@ -156,6 +271,8 @@ export function applyStyleBlock(
  */
 function atRuleSignatures(root: postcss.Root): Set<string> {
 	const sigs = new Set<string>();
-	root.walkAtRules((at) => sigs.add(`@${at.name} ${at.params}`.trim()));
+	root.walkAtRules((at) => {
+		sigs.add(`@${at.name} ${at.params}`.trim());
+	});
 	return sigs;
 }

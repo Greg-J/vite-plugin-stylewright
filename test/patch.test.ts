@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyEdit, readRules, readStyle, applyStyleBlock, isCompleteCss } from '../src/server/patch.js';
+import { applyEdit, readRules, applyRules, readStyle, applyStyleBlock, isCompleteCss } from '../src/server/patch.js';
 import { findStyleBlock } from '../src/server/locate.js';
 
 const SAMPLE = `<script>
@@ -47,6 +47,44 @@ describe('readRules', () => {
 		expect(btn).toBeDefined();
 		expect(btn!.decls).toContainEqual({ prop: 'color', value: '#333' });
 		expect(btn!.decls).toContainEqual({ prop: 'padding', value: '8px 14px' });
+	});
+});
+
+const RICH = `<div class="hero"></div>
+<style>
+	.hero { color: white; }
+	@media (min-width: 768px) {
+		.hero { color: navy; }
+	}
+	@keyframes spin {
+		from { transform: rotate(0); }
+		to { transform: rotate(360deg); }
+	}
+</style>
+`;
+
+describe('readRules — at-rule context', () => {
+	it('tags rules with their enclosing @media (outermost first); top-level rules have none', () => {
+		const { rules } = readRules(RICH);
+		const top = rules.filter((r) => r.selector === '.hero' && !r.media);
+		const media = rules.filter((r) => r.selector === '.hero' && r.media);
+		expect(top).toHaveLength(1);
+		expect(media).toHaveLength(1);
+		expect(media[0].media).toEqual([{ name: 'media', params: '(min-width: 768px)' }]);
+	});
+
+	it('gives every surfaced rule a stable, ascending id and skips @keyframes steps', () => {
+		const { rules } = readRules(RICH);
+		// keyframe steps (from/to) are animation frames, not editable selectors
+		expect(rules.some((r) => r.selector === 'from' || r.selector === 'to')).toBe(false);
+		const ids = rules.map((r) => r.id as number);
+		expect(ids.every((i) => typeof i === 'number')).toBe(true);
+		expect(new Set(ids).size).toBe(ids.length); // unique
+		expect([...ids]).toEqual([...ids].sort((a, b) => a - b)); // ascending (source order)
+		// the @media override's id comes after the base rule's (walk order)
+		const base = rules.find((r) => r.selector === '.hero' && !r.media)!;
+		const resp = rules.find((r) => r.selector === '.hero' && r.media)!;
+		expect((resp.id as number) > (base.id as number)).toBe(true);
 	});
 });
 
@@ -173,6 +211,92 @@ describe('applyStyleBlock — at-rule guard', () => {
 		const res = applyStyleBlock(SAMPLE, '\n  .btn { color: teal; }\n');
 		expect(res.droppedAtRules).toBeFalsy();
 		expect(res.changed).toBe(true);
+	});
+});
+
+const COMMENTED = `<div class="a"></div>
+<style>
+	/* brand color */
+	.a {
+		color: red;
+		padding: 8px;
+	}
+
+	@media (min-width: 600px) {
+		/* wide */
+		.a { color: blue; }
+	}
+</style>
+`;
+
+describe('applyRules — structure-preserving save (the real fix)', () => {
+	it('edits a declaration INSIDE @media without flattening the wrapper or harming keyframes', () => {
+		const rules = readRules(RICH).rules;
+		const media = rules.find((r) => r.selector === '.hero' && r.media)!;
+		media.decls = media.decls.map((d) => (d.prop === 'color' ? { ...d, value: 'red' } : d));
+		const res = applyRules(RICH, rules);
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('@media (min-width: 768px)'); // wrapper preserved — NOT flattened
+		expect(res.code).toContain('color: red'); // the edit landed
+		expect(res.code).toContain('@keyframes spin'); // keyframes preserved
+		expect(res.code).toContain('rotate(0)'); // from-step intact
+		expect(res.code).toContain('rotate(360deg)'); // to-step intact
+		expect(res.code).toMatch(/\.hero\s*{\s*color:\s*white/); // top-level rule untouched
+	});
+
+	it('edits a top-level rule and leaves the @media override untouched', () => {
+		const rules = readRules(RICH).rules;
+		const top = rules.find((r) => r.selector === '.hero' && !r.media)!;
+		top.decls[0] = { prop: 'color', value: 'black' };
+		const res = applyRules(RICH, rules);
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('color: black');
+		expect(res.code).toContain('@media (min-width: 768px)');
+		expect(res.code).toMatch(/@media[^}]*\.hero\s*{\s*color:\s*navy/); // override still navy
+	});
+
+	it('fast path: a value-only edit changes ONLY that value, byte-for-byte otherwise', () => {
+		const rules = readRules(COMMENTED).rules;
+		const a = rules.find((r) => r.selector === '.a' && !r.media)!;
+		a.decls = a.decls.map((d) => (d.prop === 'color' ? { ...d, value: 'green' } : d));
+		const res = applyRules(COMMENTED, rules);
+		expect(res.changed).toBe(true);
+		expect(res.code).toBe(COMMENTED.replace('color: red', 'color: green'));
+	});
+
+	it('preserves comments and the @media block on save', () => {
+		const rules = readRules(COMMENTED).rules;
+		const a = rules.find((r) => r.selector === '.a' && !r.media)!;
+		a.decls = a.decls.map((d) => (d.prop === 'padding' ? { ...d, value: '12px' } : d));
+		const res = applyRules(COMMENTED, rules);
+		expect(res.code).toContain('/* brand color */');
+		expect(res.code).toContain('/* wide */');
+		expect(res.code).toContain('@media (min-width: 600px)');
+		expect(res.code).toContain('padding: 12px');
+	});
+
+	it('adds a declaration to a rule (slow path) without disturbing structure', () => {
+		const rules = readRules(RICH).rules;
+		const top = rules.find((r) => r.selector === '.hero' && !r.media)!;
+		top.decls.push({ prop: 'padding', value: '8px' });
+		const res = applyRules(RICH, rules);
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('padding: 8px');
+		expect(res.code).toContain('@media (min-width: 768px)');
+		expect(res.code).toContain('@keyframes spin');
+	});
+
+	it('is a no-op when nothing changed', () => {
+		const { rules } = readRules(RICH);
+		const res = applyRules(RICH, rules);
+		expect(res.changed).toBe(false);
+		expect(res.code).toBe(RICH);
+	});
+
+	it('ignores rules with no id / unknown id (never creates rules in Phase 1)', () => {
+		const res = applyRules(RICH, [{ selector: '.ghost', decls: [{ prop: 'color', value: 'red' }] }]);
+		expect(res.changed).toBe(false);
+		expect(res.code).toBe(RICH);
 	});
 });
 

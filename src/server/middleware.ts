@@ -12,13 +12,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readRules, applyEdit, readStyle, applyStyleBlock } from './patch.js';
+import { readRules, applyEdit, applyRules, readStyle, applyStyleBlock } from './patch.js';
 import type {
 	SwRulesResponse,
 	SwEditRequest,
 	SwEditResponse,
 	SwStyleResponse,
-	SwStyleSaveRequest
+	SwStyleSaveRequest,
+	SwApplyRequest
 } from '../shared/protocol.js';
 
 const PREFIX = '/__stylewright';
@@ -241,6 +242,28 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 				const result = applyStyleBlock(source, save.css);
 				if (result.changed) await writeFile(abs, result.code, 'utf8');
 				return sendJson(res, 200, { ok: true, changed: result.changed, invalid: result.invalid, droppedAtRules: result.droppedAtRules });
+			} catch (err) {
+				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
+			}
+		}
+
+		// --- structure-preserving save (postcss reconcile, preserves at-rules) ---
+		if (req.method === 'POST' && url.startsWith(`${PREFIX}/apply`)) {
+			let body: SwApplyRequest;
+			try {
+				body = JSON.parse(await readBody(req));
+			} catch {
+				return sendJson(res, 400, { ok: false, changed: false, error: 'invalid json' });
+			}
+			const abs = resolveSvelteFile(root, body?.file);
+			if (!abs || !Array.isArray(body.rules)) {
+				return sendJson(res, 400, { ok: false, changed: false, error: 'bad request' });
+			}
+			try {
+				const source = await readFile(abs, 'utf8');
+				const result = applyRules(source, body.rules);
+				if (result.changed) await writeFile(abs, result.code, 'utf8');
+				return sendJson(res, 200, { ok: true, changed: result.changed, matched: result.matched });
 			} catch (err) {
 				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
 			}
