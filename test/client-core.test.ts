@@ -32,6 +32,14 @@ describe('color: round-trips', () => {
 		expect(formatColor(c.h, c.s, c.v, c.a, c.fmt)).toBe('rgba(255, 0, 0, 0.5)');
 	});
 
+	it('emits and round-trips hsl notation', () => {
+		expect(formatColor(0, 1, 1, 1, 'hsl')).toBe('hsl(0, 100%, 50%)');
+		const c = parseColor('hsl(120, 100%, 50%)');
+		expect(c.fmt).toBe('hsl');
+		expect(formatColor(c.h, c.s, c.v, c.a, c.fmt)).toBe('hsl(120, 100%, 50%)');
+		expect(sameColor('hsl(0, 100%, 50%)', '#ff0000')).toBe(true); // same color, different notation
+	});
+
 	it('hsvToRgb / rgbToHex agree on primaries', () => {
 		expect(rgbToHex(...hsvToRgb(0, 1, 1))).toBe('#ff0000');
 		expect(rgbToHex(...hsvToRgb(120, 1, 1))).toBe('#00ff00');

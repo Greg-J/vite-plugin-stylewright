@@ -3,7 +3,7 @@
 
 import { NAMED } from './data';
 
-export type ColorFmt = 'hex' | 'rgb';
+export type ColorFmt = 'hex' | 'rgb' | 'hsl';
 export interface Hsva { h: number; s: number; v: number; a: number; fmt: ColorFmt; }
 
 export function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
@@ -84,7 +84,7 @@ export function parseColor(str: string): Hsva {
 			const av = p[3];
 			if (av != null) a = av.indexOf('%') >= 0 ? parseFloat(av) / 100 : parseFloat(av);
 			if (isNaN(a)) a = 1;
-			fmt = 'rgb';
+			fmt = /^hsl/i.test(m[1]) ? 'hsl' : 'rgb'; // preserve the author's notation
 		}
 	}
 	const hsv = rgbToHsv(r, g, b);
@@ -97,6 +97,12 @@ export function formatColor(h: number, s: number, v: number, a: number | null, f
 	const alpha = Math.max(0, Math.min(1, a == null ? 1 : a));
 	if (fmt === 'rgb') {
 		return alpha >= 1 ? `rgb(${R}, ${G}, ${B})` : `rgba(${R}, ${G}, ${B}, ${Math.round(alpha * 100) / 100})`;
+	}
+	if (fmt === 'hsl') {
+		const L = v * (1 - s / 2);
+		const sl = L === 0 || L === 1 ? 0 : (v - L) / Math.min(L, 1 - L);
+		const H = Math.round(((h % 360) + 360) % 360), S = Math.round(sl * 100), Lp = Math.round(L * 100);
+		return alpha >= 1 ? `hsl(${H}, ${S}%, ${Lp}%)` : `hsla(${H}, ${S}%, ${Lp}%, ${Math.round(alpha * 100) / 100})`;
 	}
 	const hx = rgbToHex(R, G, B);
 	if (alpha >= 1) return hx;

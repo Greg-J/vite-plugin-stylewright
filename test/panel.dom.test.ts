@@ -260,6 +260,17 @@ describe('Panel: scrub + add cleanup + color seed', () => {
 		expect(rules(panel)[0].decls[1].v).toContain('Georgia');
 	});
 
+	it('cycles the color notation hex → rgb → hsl from the picker', async () => {
+		const { panel, shadow } = await openEditor([{ selector: '.btn', decls: [{ prop: 'color', value: '#ff0000' }] }]);
+		(panel as unknown as { openColor: (a: number, b: number, c: number) => void }).openColor(0, 0, 0); await tick();
+		const cycleBtn = () => [...shadow.querySelectorAll('button')].find((b) => ['HEX', 'RGB', 'HSL'].includes(b.textContent?.trim() ?? ''))!;
+		expect(cycleBtn().textContent).toBe('HEX');
+		cycleBtn().dispatchEvent(new MouseEvent('click')); await tick(); vi.advanceTimersByTime(250); await tick();
+		expect(rules(panel)[0].decls[0].v).toBe('rgb(255, 0, 0)');
+		cycleBtn().dispatchEvent(new MouseEvent('click')); await tick(); vi.advanceTimersByTime(250); await tick();
+		expect(rules(panel)[0].decls[0].v).toBe('hsl(0, 100%, 50%)');
+	});
+
 	it('reverts an auto-seeded color closed untouched', async () => {
 		const { panel } = await openEditor([{ selector: '.btn', decls: [{ prop: 'color', value: '' }] }]);
 		const p = panel as unknown as { openColorForFirst: (a: number, b: number) => void; closeColorPicker: () => void };
