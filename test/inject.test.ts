@@ -57,6 +57,19 @@ describe('html inject middleware', () => {
 		expect(res.finalBody!.toString('utf8').match(/\/__stylewright\/client\.js/g)?.length).toBe(1);
 	});
 
+	it('handles Uint8Array body chunks without corrupting them (SvelteKit streams)', () => {
+		const res = makeRes();
+		run(res);
+		res.setHeader('content-type', 'text/html');
+		const enc = new TextEncoder();
+		res.write(enc.encode('<html><body>café '));
+		res.end(enc.encode('done</body></html>'));
+		const body = res.finalBody!.toString('utf8');
+		expect(body).toContain('café done'); // real text, NOT "60,47,98,..."
+		expect(body).not.toMatch(/\d{2,3},\d{2,3},\d{2,3}/); // no comma-joined byte garbage
+		expect(body).toContain('/__stylewright/client.js" defer></script></body>'); // injected before </body>
+	});
+
 	it('leaves non-HTML responses untouched', () => {
 		const res = makeRes();
 		run(res);
