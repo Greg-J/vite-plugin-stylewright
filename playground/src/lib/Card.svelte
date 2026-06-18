@@ -18,7 +18,7 @@
 
 	.title {
 		margin: 0 0 9px;
-		color: #0c2a3094;
+		color: #2392a894;
 		font-size: 20px;
 		font-family: "IBM Plex Mono", sans-serif;
 	}

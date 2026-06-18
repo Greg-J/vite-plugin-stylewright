@@ -99,10 +99,19 @@ export function createHtmlInjectMiddleware(): Connect.NextHandleFunction {
 		const origWrite = res.write.bind(res);
 		const origEnd = res.end.bind(res) as (data?: string | Buffer, cb?: () => void) => ServerResponse;
 		const toBuf = (c: unknown): Buffer => {
-			if (Buffer.isBuffer(c)) return c;
 			if (typeof c === 'string') return Buffer.from(c);
-			if (c instanceof Uint8Array) return Buffer.from(c); // SvelteKit streams Uint8Array chunks
-			if (c instanceof ArrayBuffer) return Buffer.from(new Uint8Array(c));
+			if (Buffer.isBuffer(c)) return c;
+			// Cross-realm safe. SvelteKit's SSR module runner renders in a SEPARATE
+			// realm (Vite runs SSR in a vm context), so its streamed body chunks are
+			// Uint8Arrays whose `instanceof Uint8Array` — tested against THIS realm's
+			// constructor — is false. The old code then String()-ified the bytes into
+			// "60,47,98,..." and shipped that as the page. ArrayBuffer.isView and
+			// Symbol.toStringTag are brand checks that hold across realms.
+			if (ArrayBuffer.isView(c)) {
+				const v = c as ArrayBufferView;
+				return Buffer.from(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
+			}
+			if (Object.prototype.toString.call(c) === '[object ArrayBuffer]') return Buffer.from(c as ArrayBuffer);
 			return Buffer.from(String(c));
 		};
 		const lastCb = (a: unknown[]): (() => void) | undefined => (typeof a[a.length - 1] === 'function' ? (a[a.length - 1] as () => void) : undefined);

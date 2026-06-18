@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import vm from 'node:vm';
 import { createHtmlInjectMiddleware } from '../src/server/middleware.js';
 
 /** A minimal stand-in for Node's ServerResponse that records the final body.
@@ -64,6 +65,30 @@ describe('html inject middleware', () => {
 		const enc = new TextEncoder();
 		res.write(enc.encode('<html><body>café '));
 		res.end(enc.encode('done</body></html>'));
+		const body = res.finalBody!.toString('utf8');
+		expect(body).toContain('café done'); // real text, NOT "60,47,98,..."
+		expect(body).not.toMatch(/\d{2,3},\d{2,3},\d{2,3}/); // no comma-joined byte garbage
+		expect(body).toContain('/__stylewright/client.js" defer></script></body>'); // injected before </body>
+	});
+
+	it('handles CROSS-REALM Uint8Array chunks (the real SvelteKit SSR case)', () => {
+		const res = makeRes();
+		run(res);
+		res.setHeader('content-type', 'text/html');
+		// SvelteKit's SSR runs in a separate module realm (Vite uses a vm context), so
+		// its streamed chunks are Uint8Arrays whose `instanceof Uint8Array` is FALSE in
+		// this realm. Reproduce that exactly with vm.runInNewContext — a same-realm
+		// `new TextEncoder().encode()` does NOT exercise this path.
+		const mk = (s: string): Uint8Array => {
+			const ctx: { codes: number[]; out?: Uint8Array } = { codes: [...Buffer.from(s, 'utf8')] };
+			vm.runInNewContext('out = Uint8Array.from(codes)', ctx);
+			return ctx.out as Uint8Array;
+		};
+		const a = mk('<html><body>café ');
+		const b = mk('done</body></html>');
+		expect(a instanceof Uint8Array).toBe(false); // proves the cross-realm condition holds
+		res.write(a);
+		res.end(b);
 		const body = res.finalBody!.toString('utf8');
 		expect(body).toContain('café done'); // real text, NOT "60,47,98,..."
 		expect(body).not.toMatch(/\d{2,3},\d{2,3},\d{2,3}/); // no comma-joined byte garbage
