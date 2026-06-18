@@ -317,4 +317,40 @@ describe('Panel: focus the picked element', () => {
 		await tick();
 		expect(ctx.shadow.textContent || '').toContain('.sidebar'); // now visible
 	});
+
+	it('climbs to the nearest styled ancestor when you click an UNSTYLED element', async () => {
+		// rich-component shape: a class-less <span> deep inside styled boxes (the
+		// golfability case — clicking bare text used to focus nothing).
+		const card = document.createElement('div'); card.className = 'card';
+		const label = document.createElement('div'); label.className = 'label';
+		const bare = document.createElement('span'); bare.textContent = 'x'; // NO class — what you click
+		label.appendChild(bare); card.appendChild(label); document.body.appendChild(card);
+		const ctx = makePanel([
+			{ id: 0, selector: '.card', decls: [{ prop: 'padding', value: '8px' }] },
+			{ id: 1, selector: '.card .label', decls: [{ prop: 'color', value: 'red' }] },
+			{ id: 2, selector: '.other', decls: [{ prop: 'width', value: '10px' }] }
+		]);
+		await ctx.panel.pick('X.svelte', META, bare);
+		await tick();
+		const text = ctx.shadow.textContent || '';
+		expect(text).toContain('Focused on .label'); // climbed from bare <span> → .label
+		expect(text).toContain('.card .label'); // its rule is shown
+		expect(text).not.toContain('.other'); // unrelated rule stays hidden
+	});
+
+	it('includes descendant rules when you click a container', async () => {
+		const card = document.createElement('div'); card.className = 'card';
+		const label = document.createElement('div'); label.className = 'label';
+		card.appendChild(label); document.body.appendChild(card);
+		const ctx = makePanel([
+			{ id: 0, selector: '.card', decls: [{ prop: 'padding', value: '8px' }] },
+			{ id: 1, selector: '.card .label', decls: [{ prop: 'color', value: 'red' }] },
+			{ id: 2, selector: '.other', decls: [{ prop: 'width', value: '10px' }] }
+		]);
+		await ctx.panel.pick('X.svelte', META, card);
+		await tick();
+		const text = ctx.shadow.textContent || '';
+		expect(text).toContain('.card .label'); // descendant rule pulled in
+		expect(text).not.toContain('.other');
+	});
 });
