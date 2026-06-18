@@ -42,10 +42,11 @@ function makePanel(rules: SwRule[] = RULES) {
 	const hostEl = document.createElement('div');
 	document.body.appendChild(hostEl);
 	const shadow = hostEl.attachShadow({ mode: 'open' });
-	const saved: { css: string | null } = { css: null };
+	const saved: { rules: SwRule[] | null } = { rules: null };
 	const host: PanelHost = {
 		loadRules: async () => ({ hasStyle: true, rules }),
-		saveCss: async (_file, css) => { saved.css = css; return { ok: true, changed: true }; }
+		applyRules: async (_file, sent) => { saved.rules = sent; return { ok: true, changed: true }; },
+		saveCss: async () => ({ ok: true, changed: true }) // legacy path, unused by the panel
 	};
 	const panel = new Panel(shadow, host);
 	// Turn an infinite render loop into a fast failure rather than a timeout.
@@ -235,7 +236,7 @@ describe('Panel: scrub + add cleanup + color seed', () => {
 		const { shadow, saved } = await openEditor([{ selector: '.btn', decls: [{ prop: 'padding', value: '8px' }] }]);
 		qi(shadow, 'input[data-fkey="0-0-v-0"]')!.dispatchEvent(new WheelEvent('wheel', { deltaY: -1, bubbles: true, cancelable: true }));
 		vi.advanceTimersByTime(250); await tick();
-		expect(saved.css).toContain('padding'); // persisted, not lost
+		expect(saved.rules?.some((r) => r.decls.some((d) => d.prop === 'padding'))).toBe(true); // persisted, not lost
 	});
 
 	it('adding a declaration prunes a prior abandoned-empty one', async () => {
@@ -278,5 +279,42 @@ describe('Panel: scrub + add cleanup + color seed', () => {
 		expect(rules(panel)[0].decls[0].v).toBe('#6d5efc'); // seeded
 		p.closeColorPicker(); await tick();
 		expect(rules(panel)[0].decls[0].v).toBe(''); // reverted — no stray default left behind
+	});
+});
+
+describe('Panel: @media awareness', () => {
+	it('labels a responsive rule with an @media chip', async () => {
+		const { shadow } = await openEditor([
+			{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] },
+			{ id: 1, selector: '.btn', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'color', value: 'navy' }] }
+		]);
+		expect(shadow.textContent || '').toContain('@media ≥768'); // chip rendered on the override
+	});
+
+	it('still renders a plain rule with no chip', async () => {
+		const { shadow } = await openEditor([{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] }]);
+		expect(shadow.textContent || '').not.toContain('@media');
+	});
+});
+
+describe('Panel: focus the picked element', () => {
+	it('shows only the clicked element’s rules, with a Show all toggle', async () => {
+		const btn = document.createElement('button');
+		btn.className = 'btn primary';
+		document.body.appendChild(btn);
+		const ctx = makePanel([
+			{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] },
+			{ id: 1, selector: '.btn.primary', decls: [{ prop: 'color', value: 'navy' }] },
+			{ id: 2, selector: '.sidebar', decls: [{ prop: 'width', value: '200px' }] }
+		]);
+		await ctx.panel.pick('X.svelte', META, btn);
+		await tick();
+		expect(ctx.shadow.textContent || '').toContain('Show all'); // focus bar present (2 of 3)
+		expect(ctx.shadow.textContent || '').not.toContain('.sidebar'); // non-matching rule hidden while focused
+		// toggling reveals everything
+		const allBtn = [...ctx.shadow.querySelectorAll('button')].find((b) => b.textContent?.includes('Show all'))!;
+		allBtn.click();
+		await tick();
+		expect(ctx.shadow.textContent || '').toContain('.sidebar'); // now visible
 	});
 });

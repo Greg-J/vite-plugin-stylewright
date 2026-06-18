@@ -7,10 +7,29 @@ export interface SwDecl {
 	value: string;
 }
 
+/** An enclosing at-rule, e.g. { name: "media", params: "(min-width: 768px)" }. */
+export interface SwAtRule {
+	name: string;
+	params: string;
+}
+
 /** One rule from a component's <style>, expressed in SOURCE terms (no scope hash). */
 export interface SwRule {
 	selector: string;
 	decls: SwDecl[];
+	/**
+	 * Stable identity: the rule's ordinal among ALL rules in the block, in postcss
+	 * walk order (including ones not surfaced, e.g. @keyframes steps). A targeted
+	 * save uses this to patch the exact rule instead of "first selector wins".
+	 */
+	id?: number;
+	/**
+	 * Enclosing at-rule chain, OUTERMOST first — e.g. a rule inside
+	 * `@media (min-width: 768px)` carries `[{ name: 'media', params: '(min-width: 768px)' }]`.
+	 * Absent/empty for a top-level rule. Lets the overlay group + label responsive
+	 * overrides and evaluate which apply at the current viewport.
+	 */
+	media?: SwAtRule[];
 }
 
 /** Response to `GET /__stylewright/rules?file=<path>`. */
@@ -72,5 +91,26 @@ export interface SwStyleSaveResponse {
 	 * once the save model is structure-aware.
 	 */
 	droppedAtRules?: boolean;
+	error?: string;
+}
+
+/**
+ * Body of `POST /__stylewright/apply` — the STRUCTURE-PRESERVING save. The client
+ * sends its edited rule model (each rule carrying the `id` from `GET /rules`); the
+ * server patches only those rules' declarations back into the parsed source tree,
+ * leaving @media/@keyframes/comments/untouched rules intact. Supersedes the flat
+ * whole-block `/style` save for components with at-rules.
+ */
+export interface SwApplyRequest {
+	file: string;
+	rules: SwRule[];
+}
+
+/** Response to `POST /__stylewright/apply`. */
+export interface SwApplyResponse {
+	ok: boolean;
+	changed: boolean;
+	/** How many incoming rules were matched to a source rule by id (diagnostic). */
+	matched?: number;
 	error?: string;
 }

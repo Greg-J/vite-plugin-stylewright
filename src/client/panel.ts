@@ -14,13 +14,18 @@ import {
 	hsvToRgb, rgbToHex, parseColor, formatColor, isColorValue,
 	normColor, sameColor, swatchStyle, alphaTrackStyle, type ColorFmt
 } from './color.js';
-import { fromServerRules, serializeRules, cloneRules, type Rule } from './rules.js';
+import { fromServerRules, toServerRules, cloneRules, type Rule } from './rules.js';
 import { History, type HistState } from './history.js';
-import type { SwRule, SwStyleSaveResponse } from '../shared/protocol.js';
+import type { SwRule, SwAtRule, SwStyleSaveResponse, SwApplyResponse } from '../shared/protocol.js';
 
 /** Server glue the overlay needs — provided by the boot module. */
 export interface PanelHost {
 	loadRules(file: string): Promise<{ hasStyle: boolean; rules: SwRule[]; error?: string }>;
+	/** Structure-preserving save (POST /apply): patches the exact source rules,
+	 *  preserving @media/keyframes/comments. This is the save path the panel uses. */
+	applyRules(file: string, rules: SwRule[]): Promise<SwApplyResponse>;
+	/** Legacy flat whole-block save (POST /style). Kept for back-compat; not used by
+	 *  the panel anymore because it can't represent at-rules. */
 	saveCss(file: string, css: string): Promise<SwStyleSaveResponse>;
 }
 
@@ -52,6 +57,9 @@ interface State {
 	meta: PickMeta | null;
 	rules: Rule[];
 	hl: Highlight | null;
+	/** When true, the editor shows only the rules matching the picked element
+	 *  (with a "show all" toggle). Set on each pick; flipped by the focus bar. */
+	focusPick: boolean;
 }
 
 type SvgEl = HTMLElement & SVGElement;
@@ -108,7 +116,7 @@ export class Panel {
 			colorHistory: [],
 			focus: null, color: null, menu: null, acIndex: 0,
 			status: { kind: 'idle', text: 'Pick an element to edit its styles' },
-			file: null, meta: null, rules: [], hl: null
+			file: null, meta: null, rules: [], hl: null, focusPick: false
 		};
 
 		this.keyHandler = (e) => {
@@ -260,7 +268,15 @@ export class Panel {
 		if (v === 'pick') this.setState({ view: this.state.file ? 'editing' : 'closed', hl: null });
 		else this.setState({ view: 'pick', hl: null });
 	}
-	async pick(file: string | null, meta: PickMeta | null): Promise<void> {
+	/** Source-index set of rules whose selector matches the element you clicked —
+	 *  drives the "focus this element" filter. Null when nothing's been picked. */
+	private pickedRis: Set<number> | null = null;
+	/** Test a live element against a source selector (`:global()`/pseudos stripped),
+	 *  swallowing invalid-selector errors. */
+	private safeMatches(elx: Element, sel: string): boolean {
+		try { return !!sel && elx.matches(sel); } catch { return false; }
+	}
+	async pick(file: string | null, meta: PickMeta | null, el?: Element | null): Promise<void> {
 		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [] }); return; }
 		// Don't touch file/rules until the load resolves — set them atomically so
 		// the history records one clean baseline (not an old-rules/new-file blip).
@@ -270,7 +286,13 @@ export class Panel {
 			if (resp.error) { this.setState({ status: { kind: 'err', text: resp.error } }); return; }
 			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); return; }
 			const rules = fromServerRules(resp.rules);
-			this.setState({ file, meta, rules, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
+			// Which rules does the clicked element match? (so the editor can open
+			// focused on what you picked, not the whole component.)
+			const target = el || null;
+			this.pickedRis = target
+				? new Set(rules.flatMap((r, i) => (this.safeMatches(target, this.matchableSelector(r.sel)) ? [i] : [])))
+				: null;
+			this.setState({ file, meta, rules, focusPick: true, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
 		}
@@ -342,12 +364,12 @@ export class Panel {
 		this.saveTimer = setTimeout(() => void this.doSave(file, rules), 200);
 	}
 	private async doSave(file: string, rules: Rule[]): Promise<void> {
-		const css = serializeRules(rules);
 		try {
-			const d = await this.host.saveCss(file, css);
+			// Structure-preserving save: send the rule model (each rule keyed by its
+			// source id) and let the server patch only those rules in the parsed tree,
+			// leaving @media / keyframes / comments intact.
+			const d = await this.host.applyRules(file, toServerRules(rules));
 			if (!d.ok) this.setState({ status: { kind: 'err', text: d.error || 'Save failed' } });
-			else if (d.droppedAtRules) this.setState({ status: { kind: 'err', text: 'Not saved — @media-aware editing is coming. Saving now would flatten this component’s responsive rules.' } });
-			else if (d.invalid) this.setState({ status: { kind: 'idle', text: 'Incomplete CSS — not saved yet' } });
 			else if (d.changed) this.setState({ status: { kind: 'ok', text: 'Saved · HMR repainted from source' } });
 			else this.setState({ status: { kind: 'idle', text: 'No change' } });
 		} catch (err) {
@@ -873,15 +895,116 @@ export class Panel {
 				style: { display: 'inline-flex', alignItems: 'center', gap: 5, border: '1px dashed rgba(255,255,255,.14)', background: 'transparent', color: '#6a6a78', fontFamily: '"IBM Plex Mono",monospace', fontSize: 11, padding: '2px 8px', borderRadius: 6, cursor: 'pointer' }
 			}, ic(11, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.6, strokeLinecap: 'round' }, pth('M12 5v14M5 12h14')), 'add declaration'));
 	}
+	// ---------- @media awareness + DOM ordering ----------
+	/** A live-DOM-matchable form of a source selector: unwrap `:global()`, drop
+	 *  pseudo-elements / pseudo-classes so `document.querySelector` can find a
+	 *  representative element to order by. */
+	private matchableSelector(sel: string): string {
+		return sel
+			.replace(/:global\(([^)]*)\)/g, '$1')
+			.replace(/::[\w-]+/g, '')
+			.replace(/:[\w-]+(\([^)]*\))?/g, '')
+			.trim();
+	}
+	/** Does this at-rule apply at the CURRENT viewport? Only @media is evaluated;
+	 *  other at-rules are treated as always-on so we don't dim them. */
+	private atRuleMatches(m: SwAtRule): boolean {
+		if (m.name.toLowerCase() !== 'media') return true;
+		try { return window.matchMedia(m.params).matches; } catch { return true; }
+	}
+	private ruleActive(rule: Rule): boolean {
+		return !rule.media || rule.media.every((m) => this.atRuleMatches(m));
+	}
+	/** Order rules by the document position of their matching element (top-to-bottom),
+	 *  so each @media override lands right under its base rule; same-element rules keep
+	 *  source order; selectors matching nothing on the page sink to the bottom. Returns
+	 *  source indices (ri) in display order — ri stays the array index used for editing. */
+	private orderedView(): number[] {
+		const rs = this.state.rules;
+		const idx = rs.map((_, i) => i);
+		const FAR = Number.MAX_SAFE_INTEGER;
+		let pos: Map<Element, number> | null = null;
+		try {
+			pos = new Map(Array.from(document.querySelectorAll('*')).map((e, i) => [e, i] as const));
+		} catch { pos = null; }
+		const domIndex = (sel: string): number => {
+			if (!pos) return FAR;
+			const cleaned = this.matchableSelector(sel);
+			if (!cleaned) return FAR;
+			let elx: Element | null = null;
+			try { elx = document.querySelector(cleaned); } catch { elx = null; }
+			return elx ? (pos.get(elx) ?? FAR) : FAR;
+		};
+		const key = new Map<number, number>(idx.map((i) => [i, domIndex(rs[i].sel)]));
+		return idx.sort((a, b) => (key.get(a)! - key.get(b)!) || (a - b));
+	}
+	/** Short label for an @media chip, e.g. "@media ≥768". */
+	private shortMedia(m: SwAtRule): string {
+		const min = m.params.match(/min-width:\s*([\d.]+)px/);
+		const max = m.params.match(/max-width:\s*([\d.]+)px/);
+		if (min) return `@media ≥${min[1]}`;
+		if (max) return `@media ≤${max[1]}`;
+		return `@${m.name}`;
+	}
+	private mediaChip(media: SwAtRule[]): SvgEl {
+		const active = media.every((m) => this.atRuleMatches(m));
+		const label = media.map((m) => this.shortMedia(m)).join(' · ');
+		const full = media.map((m) => `@${m.name} ${m.params}`).join('  ');
+		return el('span', {
+			title: full + (active ? ' — active at this width' : ' — inactive at this width'),
+			style: {
+				fontFamily: '"IBM Plex Mono",monospace', fontSize: '10px', padding: '0 6px',
+				borderRadius: '4px', lineHeight: '16px', alignSelf: 'center', flex: 'none',
+				background: active ? 'rgba(52,211,153,.14)' : 'rgba(255,255,255,.05)',
+				color: active ? '#34d399' : '#8a8a96',
+				border: `1px solid ${active ? 'rgba(52,211,153,.32)' : 'rgba(255,255,255,.1)'}`
+			}
+		}, label);
+	}
+	private ruleHeaderLine(rule: Rule): SvgEl {
+		return el('div', { style: { display: 'flex', alignItems: 'baseline', gap: '7px', flexWrap: 'wrap', whiteSpace: 'pre', padding: '1px 0' } },
+			rule.media && rule.media.length ? this.mediaChip(rule.media) : null,
+			el('span', { style: { color: C_SEL } }, rule.sel),
+			el('span', { style: { color: C_PUNCT } }, ' {'));
+	}
+	/** Bar above the rules: "Focused on .x" with a Show all / Focus toggle. Only
+	 *  shown when the picked element matches some-but-not-all of the rules. */
+	private focusBar(focused: boolean, total: number): SvgEl {
+		const label = (this.state.meta && this.state.meta.selectorLabel) || 'element';
+		const txt = focused ? `Focused on ${label}` : `Showing all ${total} rules`;
+		const btn = focused ? `Show all (${total})` : `Focus ${label}`;
+		return el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '0 4px 8px', marginBottom: '8px', borderBottom: '1px solid rgba(255,255,255,.06)' } },
+			el('span', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '10.5px', color: '#8a8a96' } }, txt),
+			el('span', { style: { flex: '1' } }),
+			el('button', {
+				onClick: () => this.setState({ focusPick: !this.state.focusPick }),
+				style: { border: '1px solid rgba(139,124,246,.3)', background: 'rgba(139,124,246,.1)', color: '#c4baff', borderRadius: '5px', padding: '2px 9px', cursor: 'pointer', fontFamily: '"IBM Plex Mono",monospace', fontSize: '10.5px' }
+			}, btn));
+	}
 	private buildEditor(): SvgEl {
 		const rs = this.curRules();
+		const order = this.orderedView();
+		const canFocus = !!(this.pickedRis && this.pickedRis.size > 0 && this.pickedRis.size < rs.length);
+		const focused = canFocus && this.state.focusPick;
+		const displayRis = focused ? order.filter((ri) => this.pickedRis!.has(ri)) : order;
 		const out: SvgEl[] = [];
-		rs.forEach((rule, ri) => {
-			out.push(el('div', { style: { whiteSpace: 'pre', padding: '1px 0' } }, el('span', { style: { color: C_SEL } }, rule.sel), el('span', { style: { color: C_PUNCT } }, ' {')));
-			rule.decls.forEach((d, di) => out.push(this.declLine(d, ri, di)));
-			out.push(this.addLine(ri));
-			out.push(el('div', { style: { whiteSpace: 'pre', padding: '1px 0' } }, el('span', { style: { color: C_PUNCT } }, '}')));
-			if (ri < rs.length - 1) out.push(el('div', { style: { height: 12 } }));
+		if (canFocus) out.push(this.focusBar(focused, rs.length));
+		displayRis.forEach((ri, idx) => {
+			const rule = rs[ri];
+			const active = this.ruleActive(rule);
+			const isResp = !!(rule.media && rule.media.length);
+			const inner: SvgEl[] = [this.ruleHeaderLine(rule)];
+			rule.decls.forEach((d, di) => inner.push(this.declLine(d, ri, di)));
+			inner.push(this.addLine(ri));
+			inner.push(el('div', { style: { whiteSpace: 'pre', padding: '1px 0' } }, el('span', { style: { color: C_PUNCT } }, '}')));
+			out.push(el('div', {
+				style: {
+					opacity: active ? '1' : '0.5',
+					transition: 'opacity .15s',
+					marginBottom: idx < displayRis.length - 1 ? '12px' : '0',
+					...(isResp ? { borderLeft: '2px solid rgba(139,124,246,.3)', marginLeft: '4px', paddingLeft: '7px' } : {})
+				}
+			}, inner));
 		});
 		return el('div', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: 12.5, lineHeight: '22px' } }, out);
 	}

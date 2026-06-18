@@ -6,7 +6,7 @@
 // Element -> source file resolution uses Svelte's dev metadata (`__svelte_meta`).
 // This module owns booting + the real element picker; the Panel owns the UI.
 
-import type { SwRulesResponse, SwStyleSaveResponse } from '../shared/protocol.js';
+import type { SwRule, SwRulesResponse, SwStyleSaveResponse, SwApplyResponse } from '../shared/protocol.js';
 import { Panel, type PanelHost, type PickMeta } from './panel.js';
 import { ensureFonts, SHADOW_CSS } from './theme.js';
 
@@ -50,6 +50,14 @@ const serverHost: PanelHost = {
 		const res = await fetch(`${PREFIX}/rules?file=${encodeURIComponent(file)}`);
 		const data = (await res.json()) as SwRulesResponse;
 		return { hasStyle: data.hasStyle, rules: data.rules, error: data.error };
+	},
+	async applyRules(file: string, rules: SwRule[]) {
+		const res = await fetch(`${PREFIX}/apply`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ file, rules })
+		});
+		return (await res.json()) as SwApplyResponse;
 	},
 	async saveCss(file, css) {
 		const res = await fetch(`${PREFIX}/style`, {
@@ -105,7 +113,7 @@ function boot(): void {
 		const file = resolveFile(node);
 		const meta = describe(node);
 		if (file) meta.fileLabel = shortPath(file);
-		void panel.pick(file, meta);
+		void panel.pick(file, meta, node);
 	}, true);
 }
 
