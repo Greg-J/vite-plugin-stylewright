@@ -12,7 +12,7 @@ import { PROPS, COLORISH, KEYWORDS, SYSTEM_FONTS, SYS_FAMILIES } from './data.js
 import { tokenize, classify, rankList, type Tok } from './tokenize.js';
 import {
 	hsvToRgb, rgbToHex, parseColor, formatColor, isColorValue,
-	normColor, sameColor, swatchStyle, alphaTrackStyle
+	normColor, sameColor, swatchStyle, alphaTrackStyle, type ColorFmt
 } from './color.js';
 import { fromServerRules, serializeRules, cloneRules, type Rule } from './rules.js';
 import { History, type HistState } from './history.js';
@@ -29,7 +29,7 @@ type View = 'closed' | 'pick' | 'editing' | 'no-meta' | 'no-style';
 type StatusKind = 'idle' | 'saving' | 'ok' | 'err';
 interface Status { kind: StatusKind; text: string; }
 interface Focus { ri: number; di: number; field: 'p' | 'v'; tok?: number | string | null; }
-interface ColorSel { ri: number; di: number; tok: number; h: number; s: number; v: number; a: number; fmt: 'hex' | 'rgb'; hexText?: string; }
+interface ColorSel { ri: number; di: number; tok: number; h: number; s: number; v: number; a: number; fmt: ColorFmt; hexText?: string; }
 interface Menu { ri: number; di: number; }
 interface Highlight { r: DOMRect | null; tag: string; file: string | null; }
 /** Display strings for the picked element, computed by the boot module. */
@@ -418,6 +418,26 @@ export class Panel {
 		this.setColorHSV({ h: pc.h, s: pc.s, v: pc.v, a: pc.a == null ? 1 : pc.a });
 		this.save();
 	}
+	// ---- color notation (hex → rgb → hsl), like DevTools ----
+	private nextFmt(fmt: ColorFmt): ColorFmt {
+		const order: ColorFmt[] = ['hex', 'rgb', 'hsl'];
+		return order[(order.indexOf(fmt) + 1) % order.length];
+	}
+	private cycleFormat(): void { // from the open picker
+		const c = this.state.color; if (!c) return;
+		const fmt = this.nextFmt(c.fmt);
+		this.colorWasSeeded = false;
+		this.updateToken(c.ri, c.di, c.tok, formatColor(c.h, c.s, c.v, c.a, fmt));
+		this.setState({ color: { ...c, fmt, hexText: undefined } });
+		this.save();
+	}
+	private cycleTokenFormat(ri: number, di: number, k: number): void { // shift-click a swatch
+		const toks = tokenize(this.curRules()[ri].decls[di].v);
+		const t = toks[k]; if (!t) return;
+		const c = parseColor(t.x);
+		this.updateToken(ri, di, k, formatColor(c.h, c.s, c.v, c.a == null ? 1 : c.a, this.nextFmt(c.fmt)));
+		this.save();
+	}
 
 	private loadedFonts(): string[] {
 		const set = new Set<string>();
@@ -612,7 +632,7 @@ export class Panel {
 					onBlur: () => { if (this.rebuilding || this.programmaticFocus) return; this.setState({ color: this.state.color ? { ...this.state.color, hexText: undefined } : null }); this.save(); }, // finalize to canonical form + persist
 					style: { flex: 1, minWidth: 0, color: '#ececf1', fontFamily: '"IBM Plex Mono",monospace', fontSize: 11.5, background: '#101014', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, padding: '5px 8px' }
 				}),
-				el('span', { style: { flex: 'none', color: '#7e7e8c', fontFamily: '"IBM Plex Mono",monospace', fontSize: 11, width: 30, textAlign: 'right' } }, Math.round(a * 100) + '%')),
+				el('button', { title: 'Cycle notation: hex → rgb → hsl', onClick: () => this.cycleFormat(), style: { flex: 'none', border: '1px solid rgba(255,255,255,.12)', background: '#101014', color: '#9a9aa6', fontFamily: '"IBM Plex Sans",sans-serif', fontSize: 9, fontWeight: 700, letterSpacing: '.06em', padding: '4px 6px', borderRadius: 5, cursor: 'pointer' } }, c.fmt.toUpperCase())),
 			this.swatchSection('IN USE', this.pageColors(), cur),
 			this.swatchSection('HISTORY', this.state.colorHistory || [], cur));
 	}
@@ -645,7 +665,7 @@ export class Panel {
 	private colorTok(ri: number, di: number, k: number, x: string): SvgEl {
 		const open = !!this.state.color && this.state.color.ri === ri && this.state.color.di === di && this.state.color.tok === k;
 		return el('span', { className: 'sw-pop-trigger', style: { position: 'relative', display: 'inline-flex', alignItems: 'center' } },
-			el('button', { className: 'sw-pop-trigger', title: 'Edit color', onClick: () => open ? this.closeColorPicker() : this.openColor(ri, di, k), style: { width: 11, height: 11, borderRadius: 3, border: '1px solid rgba(255,255,255,.25)', ...swatchStyle(x), cursor: 'pointer', padding: 0, marginRight: 5, boxShadow: '0 0 0 1px rgba(0,0,0,.3)', alignSelf: 'center' } }),
+			el('button', { className: 'sw-pop-trigger', title: 'Edit color · shift-click to cycle hex/rgb/hsl', onClick: (e: MouseEvent) => e.shiftKey ? this.cycleTokenFormat(ri, di, k) : (open ? this.closeColorPicker() : this.openColor(ri, di, k)), style: { width: 11, height: 11, borderRadius: 3, border: '1px solid rgba(255,255,255,.25)', ...swatchStyle(x), cursor: 'pointer', padding: 0, marginRight: 5, boxShadow: '0 0 0 1px rgba(0,0,0,.3)', alignSelf: 'center' } }),
 			this.tokInput(ri, di, k, x, C_COLOR),
 			open ? this.colorPopover() : null);
 	}
