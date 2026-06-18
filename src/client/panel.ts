@@ -268,13 +268,27 @@ export class Panel {
 		if (v === 'pick') this.setState({ view: this.state.file ? 'editing' : 'closed', hl: null });
 		else this.setState({ view: 'pick', hl: null });
 	}
-	/** Source-index set of rules whose selector matches the element you clicked —
-	 *  drives the "focus this element" filter. Null when nothing's been picked. */
+	/** Source-index set of rules to focus on (the picked element's rules); drives
+	 *  the "focus this element" filter. Null when nothing useful was picked. */
 	private pickedRis: Set<number> | null = null;
-	/** Test a live element against a source selector (`:global()`/pseudos stripped),
-	 *  swallowing invalid-selector errors. */
-	private safeMatches(elx: Element, sel: string): boolean {
-		try { return !!sel && elx.matches(sel); } catch { return false; }
+	/** Display label for the focus bar — the element we actually focused on (which
+	 *  may be a styled ancestor of an unstyled thing you clicked). */
+	private pickedLabel: string | null = null;
+	/** Rules whose selector (with `:global()`/pseudos stripped) matches `target` OR
+	 *  any element inside it — i.e. the rules that style what you clicked and its
+	 *  contents. Invalid selectors are skipped. */
+	private rulesForElement(target: Element, rules: Rule[]): Set<number> {
+		const set = new Set<number>();
+		rules.forEach((r, i) => {
+			const sel = this.matchableSelector(r.sel);
+			if (!sel) return;
+			try { if (target.matches(sel) || target.querySelector(sel)) set.add(i); } catch { /* invalid selector */ }
+		});
+		return set;
+	}
+	private elLabel(elx: Element): string {
+		const c = (elx.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean)[0];
+		return c ? '.' + c : elx.tagName.toLowerCase();
 	}
 	async pick(file: string | null, meta: PickMeta | null, el?: Element | null): Promise<void> {
 		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [] }); return; }
@@ -286,12 +300,17 @@ export class Panel {
 			if (resp.error) { this.setState({ status: { kind: 'err', text: resp.error } }); return; }
 			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); return; }
 			const rules = fromServerRules(resp.rules);
-			// Which rules does the clicked element match? (so the editor can open
-			// focused on what you picked, not the whole component.)
-			const target = el || null;
-			this.pickedRis = target
-				? new Set(rules.flatMap((r, i) => (this.safeMatches(target, this.matchableSelector(r.sel)) ? [i] : [])))
-				: null;
+			// Focus on what you clicked. If the exact element matches no rule (a bare
+			// <span>/<div> with no class — common in rich nested components), climb to
+			// the nearest styled ancestor so a click always lands somewhere useful.
+			let target: Element | null = el || null;
+			let ris = target ? this.rulesForElement(target, rules) : new Set<number>();
+			for (let hops = 0; target && ris.size === 0 && hops < 8; hops++) {
+				target = target.parentElement;
+				if (target) ris = this.rulesForElement(target, rules);
+			}
+			this.pickedRis = ris.size ? ris : null;
+			this.pickedLabel = this.pickedRis && target ? this.elLabel(target) : null;
 			this.setState({ file, meta, rules, focusPick: true, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
@@ -970,7 +989,7 @@ export class Panel {
 	/** Bar above the rules: "Focused on .x" with a Show all / Focus toggle. Only
 	 *  shown when the picked element matches some-but-not-all of the rules. */
 	private focusBar(focused: boolean, total: number): SvgEl {
-		const label = (this.state.meta && this.state.meta.selectorLabel) || 'element';
+		const label = this.pickedLabel || (this.state.meta && this.state.meta.selectorLabel) || 'element';
 		const txt = focused ? `Focused on ${label}` : `Showing all ${total} rules`;
 		const btn = focused ? `Show all (${total})` : `Focus ${label}`;
 		return el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '0 4px 8px', marginBottom: '8px', borderBottom: '1px solid rgba(255,255,255,.06)' } },
