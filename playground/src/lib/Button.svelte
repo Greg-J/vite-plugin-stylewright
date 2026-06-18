@@ -16,6 +16,7 @@
 		cursor: pointer;
 		transition: background 0.15s;
 	}
+
 	.btn:hover {
 		background: #e63600;
 	}

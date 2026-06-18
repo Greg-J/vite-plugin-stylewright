@@ -1,0 +1,271 @@
+// @vitest-environment happy-dom
+//
+// Integration tests that drive the REAL Panel through the interaction sequences
+// that kept breaking (render loops, menus closing on hover/type, caret jumps,
+// stranded empty declarations). happy-dom is faithful for shadow DOM, focus/blur
+// events and selection — but it does NOT fire `blur` when a focused node is
+// removed (the browser does, and that's what caused the menu-close bug), so we
+// shim that one documented behavior. A `render` counter turns any infinite
+// re-render loop into a fast, clear failure instead of a hang.
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Panel, type PanelHost, type PickMeta } from '../src/client/panel.js';
+import type { SwRule } from '../src/shared/protocol.js';
+
+const META: PickMeta = { fileLabel: 'Button.svelte', selectorLabel: '.btn', dims: '0 × 0', tag: '<button class="btn">' };
+const RULES: SwRule[] = [
+	{ selector: '.btn', decls: [{ prop: 'color', value: '#333' }, { prop: 'display', value: 'flex' }] }
+];
+
+let origRemoveChild: typeof Node.prototype.removeChild;
+
+beforeEach(() => {
+	vi.useFakeTimers();
+	// Browser parity: removing a subtree that contains the focused element blurs it.
+	origRemoveChild = Node.prototype.removeChild;
+	Node.prototype.removeChild = function <T extends Node>(child: T): T {
+		const root = this.getRootNode?.() as Document | ShadowRoot | undefined;
+		const active = root && (root as ShadowRoot).activeElement;
+		if (active && (child === (active as unknown as Node) || (child as unknown as Element).contains?.(active))) {
+			active.dispatchEvent(new Event('blur'));
+		}
+		return origRemoveChild.call(this, child) as T;
+	};
+});
+afterEach(() => {
+	Node.prototype.removeChild = origRemoveChild;
+	vi.useRealTimers();
+	document.body.innerHTML = '';
+});
+
+function makePanel(rules: SwRule[] = RULES) {
+	const hostEl = document.createElement('div');
+	document.body.appendChild(hostEl);
+	const shadow = hostEl.attachShadow({ mode: 'open' });
+	const saved: { css: string | null } = { css: null };
+	const host: PanelHost = {
+		loadRules: async () => ({ hasStyle: true, rules }),
+		saveCss: async (_file, css) => { saved.css = css; return { ok: true, changed: true }; }
+	};
+	const panel = new Panel(shadow, host);
+	// Turn an infinite render loop into a fast failure rather than a timeout.
+	let renders = 0;
+	const orig = (panel as unknown as { render: () => void }).render.bind(panel);
+	(panel as unknown as { render: () => void }).render = () => {
+		if (++renders > 500) throw new Error(`render loop detected (${renders} renders)`);
+		orig();
+	};
+	return { panel, shadow, saved, renderCount: () => renders };
+}
+
+/** Drain queued microtask renders (and the el() ref-flush microtask). */
+async function tick(): Promise<void> { for (let i = 0; i < 6; i++) await Promise.resolve(); }
+const q = (s: ShadowRoot, sel: string) => s.querySelector(sel) as HTMLElement | null;
+const qi = (s: ShadowRoot, sel: string) => s.querySelector(sel) as HTMLInputElement | null;
+const fkeyOf = (s: ShadowRoot) => (s.activeElement as HTMLElement | null)?.getAttribute('data-fkey') ?? null;
+const menuOpen = (s: ShadowRoot) => !!s.querySelector('.sw-pop');
+const key = (el: Element, k: string) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+/** Type each character into whatever input is currently focused (re-querying after each render). */
+async function typeInto(shadow: ShadowRoot, text: string): Promise<void> {
+	for (const ch of text) {
+		const el = shadow.activeElement as HTMLInputElement;
+		el.value += ch;
+		try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* */ }
+		el.dispatchEvent(new Event('input'));
+		await tick();
+	}
+}
+const rules = (panel: Panel) => (panel as unknown as { state: { rules: { decls: { p: string; v: string }[] }[] } }).state.rules;
+
+async function openEditor(customRules?: SwRule[]) {
+	const ctx = makePanel(customRules);
+	await ctx.panel.pick('Button.svelte', META);
+	await tick();
+	return ctx;
+}
+
+describe('Panel: focus does not loop', () => {
+	it('focusing a value token settles (no infinite re-render)', async () => {
+		const { shadow, renderCount } = await openEditor();
+		const before = renderCount();
+		q(shadow, 'input[data-fkey="0-1-v-0"]')!.focus(); // display: "flex"
+		await tick();
+		vi.advanceTimersByTime(300);
+		await tick();
+		expect(renderCount() - before).toBeLessThan(10); // a couple renders, not thousands
+		expect(fkeyOf(shadow)).toBe('0-1-v-0'); // still focused after the rebuilds
+	});
+});
+
+describe('Panel: type-ahead menu survives interaction', () => {
+	it('stays open while hovering its suggestions', async () => {
+		const { shadow } = await openEditor();
+		const prop = qi(shadow, 'input[data-fkey="0-0-p-_"]')!; // "color"
+		prop.value = ''; prop.focus(); prop.dispatchEvent(new Event('input')); // empty -> all suggestions
+		await tick();
+		expect(menuOpen(shadow)).toBe(true);
+		const item = q(shadow, '.sw-pop')!.children[0] as HTMLElement;
+		item.dispatchEvent(new Event('mouseenter'));
+		await tick();
+		vi.advanceTimersByTime(200); // the 140ms onBlur timer would have fired by now
+		await tick();
+		expect(menuOpen(shadow)).toBe(true); // menu must NOT close on hover
+		expect(fkeyOf(shadow)).toBe('0-0-p-_'); // focus retained
+	});
+
+	it('stays open while typing into the property', async () => {
+		const { shadow } = await openEditor();
+		const prop = qi(shadow, 'input[data-fkey="0-0-p-_"]')!;
+		prop.focus();
+		await tick();
+		prop.value = 'colo'; prop.dispatchEvent(new Event('input'));
+		await tick();
+		vi.advanceTimersByTime(200);
+		await tick();
+		expect(menuOpen(shadow)).toBe(true);
+		expect(fkeyOf(shadow)).toBe('0-0-p-_');
+	});
+});
+
+describe('Panel: add declaration', () => {
+	it('opens an empty declaration with the property focused and typing works', async () => {
+		const { shadow } = await openEditor();
+		const addBtn = [...shadow.querySelectorAll('button')].find((b) => b.textContent?.includes('add declaration'))!;
+		addBtn.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		// new decl at index 2, property focused
+		expect(fkeyOf(shadow)).toBe('0-2-p-_');
+		const prop = qi(shadow, 'input[data-fkey="0-2-p-_"]')!;
+		prop.value = 'm'; prop.dispatchEvent(new Event('input'));
+		await tick();
+		vi.advanceTimersByTime(200);
+		await tick();
+		expect(menuOpen(shadow)).toBe(true); // suggestions for "m" still open
+		expect(fkeyOf(shadow)).toBe('0-2-p-_'); // didn't lose focus after a keystroke
+	});
+
+	it('removes the declaration if the property is abandoned empty (real blur)', async () => {
+		const { panel, shadow } = await openEditor();
+		const addBtn = [...shadow.querySelectorAll('button')].find((b) => b.textContent?.includes('add declaration'))!;
+		addBtn.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		const decls = () => (panel as unknown as { state: { rules: { decls: unknown[] }[] } }).state.rules[0].decls.length;
+		expect(decls()).toBe(3);
+		// genuine user blur (outside a render): the empty decl should be cleaned up
+		q(shadow, 'input[data-fkey="0-2-p-_"]')!.dispatchEvent(new Event('blur'));
+		vi.advanceTimersByTime(200);
+		await tick();
+		expect(decls()).toBe(2);
+	});
+});
+
+describe('Panel: caret', () => {
+	it('preserves the caret position when typing mid-string', async () => {
+		const { shadow } = await openEditor();
+		const prop = q(shadow, 'input[data-fkey="0-0-p-_"]')!; // "color"
+		prop.focus();
+		await tick();
+		const live = q(shadow, 'input[data-fkey="0-0-p-_"]') as HTMLInputElement; // re-query after focus render
+		live.value = 'coXlor';
+		live.setSelectionRange(3, 3); // caret right after the inserted X
+		live.dispatchEvent(new Event('input'));
+		await tick();
+		const after = q(shadow, 'input[data-fkey="0-0-p-_"]') as HTMLInputElement;
+		expect(after.value).toBe('coXlor');
+		expect(after.selectionStart).toBe(3); // NOT slammed to 6 (end)
+	});
+});
+
+describe('Panel: value editing never corrupts', () => {
+	it('typing a multi-char unit yields exactly "16px" (not "16xp")', async () => {
+		const { panel, shadow } = await openEditor();
+		qi(shadow, 'input[data-fkey="0-1-v-0"]')!.focus(); // display: flex
+		await tick();
+		const live = shadow.activeElement as HTMLInputElement;
+		live.value = ''; live.dispatchEvent(new Event('input')); await tick();
+		await typeInto(shadow, '16px');
+		expect(rules(panel)[0].decls[1].v).toBe('16px');
+	});
+
+	it('typing a decimal yields exactly "1.5" (not "15.")', async () => {
+		const { panel, shadow } = await openEditor();
+		qi(shadow, 'input[data-fkey="0-1-v-0"]')!.focus();
+		await tick();
+		const live = shadow.activeElement as HTMLInputElement;
+		live.value = ''; live.dispatchEvent(new Event('input')); await tick();
+		await typeInto(shadow, '1.5rem');
+		expect(rules(panel)[0].decls[1].v).toBe('1.5rem');
+	});
+});
+
+describe('Panel: font-family commit', () => {
+	it('focuses the font value input and does not wedge focus globally', async () => {
+		const { shadow } = await openEditor();
+		[...shadow.querySelectorAll('button')].find((b) => b.textContent?.includes('add declaration'))!.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		qi(shadow, 'input[data-fkey="0-2-p-_"]')!.value = 'font-family';
+		qi(shadow, 'input[data-fkey="0-2-p-_"]')!.dispatchEvent(new Event('input')); await tick();
+		key(qi(shadow, 'input[data-fkey="0-2-p-_"]')!, 'Enter'); // re-query: the input was rebuilt
+		await tick(); vi.advanceTimersByTime(10); await tick();
+		expect(fkeyOf(shadow)).toBe('0-2-v-font'); // the single font input, not a missing numeric key
+		// focus must not be wedged: a later click still takes focus
+		qi(shadow, 'input[data-fkey="0-0-v-0"]')!.focus(); await tick();
+		expect(fkeyOf(shadow)).toBe('0-0-v-0');
+	});
+});
+
+describe('Panel: color hex typing', () => {
+	it('types a hex incrementally without losing focus or reverting', async () => {
+		const { panel, shadow } = await openEditor();
+		(panel as unknown as { openColor: (a: number, b: number, c: number) => void }).openColor(0, 0, 0);
+		await tick();
+		qi(shadow, 'input[data-fkey="0-0-v-hex"]')!.focus(); await tick();
+		const live = shadow.activeElement as HTMLInputElement;
+		live.value = ''; live.dispatchEvent(new Event('input')); await tick();
+		await typeInto(shadow, '#3b'); // partial — not a valid color
+		expect(fkeyOf(shadow)).toBe('0-0-v-hex'); // focus retained through the partial
+		expect(qi(shadow, 'input[data-fkey="0-0-v-hex"]')!.value).toBe('#3b'); // shows the partial, not the old color
+		await typeInto(shadow, '82f6');
+		expect(rules(panel)[0].decls[0].v.toLowerCase()).toBe('#3b82f6');
+	});
+});
+
+describe('Panel: scrub + add cleanup + color seed', () => {
+	it('wheel-scrubbing a number writes a save', async () => {
+		const { shadow, saved } = await openEditor([{ selector: '.btn', decls: [{ prop: 'padding', value: '8px' }] }]);
+		qi(shadow, 'input[data-fkey="0-0-v-0"]')!.dispatchEvent(new WheelEvent('wheel', { deltaY: -1, bubbles: true, cancelable: true }));
+		vi.advanceTimersByTime(250); await tick();
+		expect(saved.css).toContain('padding'); // persisted, not lost
+	});
+
+	it('adding a declaration prunes a prior abandoned-empty one', async () => {
+		const { panel, shadow } = await openEditor();
+		const addBtn = () => [...shadow.querySelectorAll('button')].find((b) => b.textContent?.includes('add declaration'))!;
+		addBtn().dispatchEvent(new MouseEvent('click')); await tick();
+		expect(rules(panel)[0].decls.length).toBe(3);
+		addBtn().dispatchEvent(new MouseEvent('click')); await tick();
+		expect(rules(panel)[0].decls.length).toBe(3); // pruned the empty, added one — not 4
+	});
+
+	it('tabbing into a font-family value auto-opens the font dropdown; typing filters + Tab commits', async () => {
+		const { panel, shadow } = await openEditor([{ selector: '.btn', decls: [{ prop: 'color', value: '#333' }, { prop: 'font-family', value: '' }] }]);
+		qi(shadow, 'input[data-fkey="0-1-p-_"]')!.focus(); await tick();
+		key(qi(shadow, 'input[data-fkey="0-1-p-_"]')!, 'Enter'); // commit the font-family property → Tab into value
+		await tick(); vi.advanceTimersByTime(10); await tick();
+		expect(fkeyOf(shadow)).toBe('0-1-v-font'); // value focused
+		expect(menuOpen(shadow)).toBe(true); // dropdown auto-opened
+		await typeInto(shadow, 'geo'); // filter to Georgia
+		key(shadow.activeElement!, 'Tab'); // commit highlighted
+		await tick(); vi.advanceTimersByTime(160); await tick();
+		expect(rules(panel)[0].decls[1].v).toContain('Georgia');
+	});
+
+	it('reverts an auto-seeded color closed untouched', async () => {
+		const { panel } = await openEditor([{ selector: '.btn', decls: [{ prop: 'color', value: '' }] }]);
+		const p = panel as unknown as { openColorForFirst: (a: number, b: number) => void; closeColorPicker: () => void };
+		p.openColorForFirst(0, 0); await tick();
+		expect(rules(panel)[0].decls[0].v).toBe('#6d5efc'); // seeded
+		p.closeColorPicker(); await tick();
+		expect(rules(panel)[0].decls[0].v).toBe(''); // reverted — no stray default left behind
+	});
+});
