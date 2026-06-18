@@ -95,6 +95,19 @@ describe('html inject middleware', () => {
 		expect(body).toContain('/__stylewright/client.js" defer></script></body>'); // injected before </body>
 	});
 
+	it('forbids caching and drops stale validators on the rewritten page', () => {
+		const res = makeRes();
+		run(res);
+		res.setHeader('content-type', 'text/html');
+		res.setHeader('etag', '"abc123"'); // SvelteKit dev sets an etag for the ORIGINAL body
+		res.setHeader('last-modified', 'Wed, 17 Jun 2026 00:00:00 GMT');
+		res.end('<html><body>hi</body></html>');
+		expect(res.getHeader('cache-control')).toBe('no-store'); // browser must never cache a dev overlay page
+		expect(res.getHeader('etag')).toBeUndefined(); // validator no longer matches our rewritten body
+		expect(res.getHeader('last-modified')).toBeUndefined();
+		expect(res.finalBody!.toString('utf8')).toContain('/__stylewright/client.js');
+	});
+
 	it('leaves non-HTML responses untouched', () => {
 		const res = makeRes();
 		run(res);
