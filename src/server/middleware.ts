@@ -80,6 +80,74 @@ function loadClient(): string {
 	return 'console.warn("[stylewright] client bundle not found — run `npm run build` in the plugin.");';
 }
 
+const SCRIPT_TAG = '<script src="/__stylewright/client.js" defer></script>';
+
+/**
+ * Inject the overlay client into HTML page responses by rewriting the response.
+ * `transformIndexHtml` works for plain Vite, but SvelteKit (and other SSR
+ * frameworks) render their own HTML and bypass that hook — so we also splice the
+ * tag in here. Idempotent: it never injects twice (skips if the tag is already
+ * present, e.g. when transformIndexHtml already ran). Dev-server only.
+ */
+export function createHtmlInjectMiddleware(): Connect.NextHandleFunction {
+	return (req, res, next) => {
+		const accept = String(req.headers.accept || '');
+		if (req.method !== 'GET' || res.headersSent || !accept.includes('text/html')) { next(); return; }
+
+		const chunks: Buffer[] = [];
+		const origWriteHead = res.writeHead.bind(res);
+		const origWrite = res.write.bind(res);
+		const origEnd = res.end.bind(res) as (data?: string | Buffer, cb?: () => void) => ServerResponse;
+		const toBuf = (c: unknown): Buffer => (Buffer.isBuffer(c) ? c : Buffer.from(typeof c === 'string' ? c : String(c)));
+		const lastCb = (a: unknown[]): (() => void) | undefined => (typeof a[a.length - 1] === 'function' ? (a[a.length - 1] as () => void) : undefined);
+
+		// SvelteKit calls writeHead(), which flushes headers immediately — too early to
+		// rewrite content-length. Capture status + headers WITHOUT flushing; we replay
+		// them through the response's own header map at end time.
+		res.writeHead = ((status: number, ...args: unknown[]): ServerResponse => {
+			if (typeof status === 'number') res.statusCode = status;
+			for (const a of args) {
+				if (Array.isArray(a)) { for (let i = 0; i + 1 < a.length; i += 2) res.setHeader(String(a[i]), a[i + 1] as number | string | readonly string[]); }
+				else if (a && typeof a === 'object') { for (const [k, v] of Object.entries(a)) res.setHeader(k, v as number | string | readonly string[]); }
+			}
+			return res;
+		}) as ServerResponse['writeHead'];
+
+		res.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
+			if (chunk != null && typeof chunk !== 'function') chunks.push(toBuf(chunk));
+			lastCb(rest)?.();
+			return true;
+		}) as ServerResponse['write'];
+
+		res.end = ((chunk?: unknown, ...rest: unknown[]): ServerResponse => {
+			if (chunk != null && typeof chunk !== 'function') chunks.push(toBuf(chunk));
+			res.writeHead = origWriteHead;
+			res.write = origWrite;
+			res.end = origEnd as ServerResponse['end'];
+			const cb = lastCb(rest);
+			const buf = Buffer.concat(chunks);
+			// Inject inside a guard: a failure here must NEVER hang the response, so we
+			// always fall through to writing the original body.
+			try {
+				const ct = String(res.getHeader('content-type') || '');
+				if (!res.headersSent && ct.includes('text/html')) {
+					let html = buf.toString('utf8');
+					if (!html.includes('/__stylewright/client.js')) {
+						html = html.includes('</body>') ? html.replace('</body>', `${SCRIPT_TAG}</body>`) : html + SCRIPT_TAG;
+					}
+					const out = Buffer.from(html, 'utf8');
+					res.setHeader('content-length', String(out.length));
+					return origEnd(out, cb);
+				}
+			} catch { /* fall through */ }
+			if (!res.headersSent) res.setHeader('content-length', String(buf.length));
+			return origEnd(buf, cb);
+		}) as ServerResponse['end'];
+
+		next();
+	};
+}
+
 export function createStylewrightMiddleware(root: string): Connect.NextHandleFunction {
 	return async (req, res, next) => {
 		const url = req.url || '';
