@@ -346,6 +346,7 @@ export class Panel {
 		try {
 			const d = await this.host.saveCss(file, css);
 			if (!d.ok) this.setState({ status: { kind: 'err', text: d.error || 'Save failed' } });
+			else if (d.droppedAtRules) this.setState({ status: { kind: 'err', text: 'Not saved — @media-aware editing is coming. Saving now would flatten this component’s responsive rules.' } });
 			else if (d.invalid) this.setState({ status: { kind: 'idle', text: 'Incomplete CSS — not saved yet' } });
 			else if (d.changed) this.setState({ status: { kind: 'ok', text: 'Saved · HMR repainted from source' } });
 			else this.setState({ status: { kind: 'idle', text: 'No change' } });

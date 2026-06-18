@@ -116,12 +116,46 @@ export function isCompleteCss(css: string): boolean {
 export function applyStyleBlock(
 	source: string,
 	css: string
-): { code: string; changed: boolean; invalid: boolean } {
+): { code: string; changed: boolean; invalid: boolean; droppedAtRules?: boolean } {
 	const block = findStyleBlock(source);
 	if (!block) return { code: source, changed: false, invalid: false };
 	if (css === block.css) return { code: source, changed: false, invalid: false };
 	if (!isCompleteCss(css)) return { code: source, changed: false, invalid: true };
+
+	// Guard against the flat whole-block serializer destroying structure. The
+	// editor's in-memory model is a flat list of rules with no at-rule context, so
+	// re-serializing a component that has @media/@keyframes/@supports/@font-face
+	// would promote those nested rules to the top level — flattening a responsive
+	// override into an always-on rule (silent data loss). If any at-rule present in
+	// the source is missing from the incoming CSS, refuse the write. Lifts once the
+	// save model becomes structure-aware.
+	let origRoot: postcss.Root;
+	let newRoot: postcss.Root;
+	try {
+		origRoot = postcss.parse(block.css);
+		newRoot = postcss.parse(css);
+	} catch {
+		return { code: source, changed: false, invalid: true };
+	}
+	const origAt = atRuleSignatures(origRoot);
+	if (origAt.size) {
+		const newAt = atRuleSignatures(newRoot);
+		for (const sig of origAt) {
+			if (!newAt.has(sig)) return { code: source, changed: false, invalid: false, droppedAtRules: true };
+		}
+	}
+
 	const ms = new MagicString(source);
 	ms.overwrite(block.start, block.end, css);
 	return { code: ms.toString(), changed: true, invalid: false };
+}
+
+/**
+ * A stable signature per at-rule ("@media (min-width: 768px)", "@keyframes spin",
+ * "@font-face") so a rewrite that would silently drop one can be detected.
+ */
+function atRuleSignatures(root: postcss.Root): Set<string> {
+	const sigs = new Set<string>();
+	root.walkAtRules((at) => sigs.add(`@${at.name} ${at.params}`.trim()));
+	return sigs;
 }

@@ -132,6 +132,50 @@ describe('applyStyleBlock', () => {
 	});
 });
 
+// Regression guard for the real bug: the editor's flat whole-block model can't
+// represent @media/@keyframes, so re-serializing a component that has them used
+// to FLATTEN the at-rules into top-level rules on save (it ate the homepage's
+// responsive overrides). applyStyleBlock must refuse such a write.
+const MEDIA_SAMPLE = `<div class="hero"></div>
+<style>
+	.hero {
+		min-height: 40vh;
+	}
+
+	@media (min-width: 768px) {
+		.hero {
+			min-height: 60vh;
+		}
+	}
+</style>
+`;
+
+describe('applyStyleBlock — at-rule guard', () => {
+	it('REFUSES a write that would drop a source @media (flattening), changes nothing', () => {
+		// Exactly what serializeRules() emits: the @media rule promoted to top level.
+		const flattened = '\n\t.hero {\n\t\tmin-height: 40vh;\n\t}\n\n\t.hero {\n\t\tmin-height: 60vh;\n\t}\n';
+		const res = applyStyleBlock(MEDIA_SAMPLE, flattened);
+		expect(res.droppedAtRules).toBe(true);
+		expect(res.changed).toBe(false);
+		expect(res.code).toBe(MEDIA_SAMPLE); // source untouched — no data loss
+	});
+
+	it('ALLOWS a write that keeps the @media wrapper (edit inside it)', () => {
+		const kept = '\n\t.hero {\n\t\tmin-height: 40vh;\n\t}\n\n\t@media (min-width: 768px) {\n\t\t.hero {\n\t\t\tmin-height: 70vh;\n\t\t}\n\t}\n';
+		const res = applyStyleBlock(MEDIA_SAMPLE, kept);
+		expect(res.droppedAtRules).toBeFalsy();
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('@media (min-width: 768px)');
+		expect(res.code).toContain('min-height: 70vh;');
+	});
+
+	it('does not block components that have no at-rules (flat edits still save)', () => {
+		const res = applyStyleBlock(SAMPLE, '\n  .btn { color: teal; }\n');
+		expect(res.droppedAtRules).toBeFalsy();
+		expect(res.changed).toBe(true);
+	});
+});
+
 describe('isCompleteCss', () => {
 	it('accepts complete declarations', () => {
 		expect(isCompleteCss('.a { color: red; padding: 8px 12px; }')).toBe(true);
