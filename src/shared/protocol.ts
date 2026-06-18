@@ -64,5 +64,13 @@ export interface SwStyleSaveResponse {
 	changed: boolean;
 	/** True when the CSS was rejected as incomplete/invalid (not written). */
 	invalid?: boolean;
+	/**
+	 * True when the write was refused because it would have dropped an at-rule
+	 * (@media/@keyframes/@supports/@font-face) present in the source. The flat
+	 * whole-block save model can't represent at-rules, so persisting would flatten
+	 * a responsive override into an always-on rule — silent data loss. Guard lifts
+	 * once the save model is structure-aware.
+	 */
+	droppedAtRules?: boolean;
 	error?: string;
 }
