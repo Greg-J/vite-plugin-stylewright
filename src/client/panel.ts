@@ -17,6 +17,9 @@ import {
 import { fromServerRules, toServerRules, cloneRules, type Rule } from './rules.js';
 import { History, type HistState } from './history.js';
 import type { SwRule, SwAtRule, SwStyleSaveResponse, SwApplyResponse } from '../shared/protocol.js';
+import { describe, resolveFile, shortPath, tagLabel, buildDomTree, pathPrefixes } from './inspect.js';
+import type { PickMeta, DomNode } from './inspect.js';
+export type { PickMeta } from './inspect.js';
 
 /** Server glue the overlay needs — provided by the boot module. */
 export interface PanelHost {
@@ -36,11 +39,16 @@ interface Status { kind: StatusKind; text: string; }
 interface Focus { ri: number; di: number; field: 'p' | 'v'; tok?: number | string | null; }
 interface ColorSel { ri: number; di: number; tok: number; h: number; s: number; v: number; a: number; fmt: ColorFmt; hexText?: string; }
 interface Menu { ri: number; di: number; }
-interface Highlight { r: DOMRect | null; tag: string; file: string | null; }
-/** Display strings for the picked element, computed by the boot module. */
-export interface PickMeta { fileLabel: string; selectorLabel: string; dims: string; tag: string; }
+/** Plain viewport rect — stored instead of a DOMRect so setState's JSON-based
+ *  change-detection can actually compare it (a DOMRect always stringifies to `{}`,
+ *  so hovering between same-tag elements would otherwise leave the box stuck). */
+interface Rect { top: number; left: number; width: number; height: number; }
+interface Highlight { r: Rect | null; tag: string; file: string | null; }
 interface Size { side: number; bottom: number; floatW: number; floatH: number; }
 interface FloatPos { x: number | null; y: number | null; }
+/** CSS/HTML split fractions: `col` = CSS top-pane height (left/right dock),
+ *  `row` = HTML left-pane width (bottom dock). */
+interface Split { col: number; row: number; }
 
 interface State {
 	dock: Dock;
@@ -60,16 +68,32 @@ interface State {
 	/** When true, the editor shows only the rules matching the picked element
 	 *  (with a "show all" toggle). Set on each pick; flipped by the focus bar. */
 	focusPick: boolean;
+	/** CSS/HTML pane split fractions (docked layouts). */
+	split: Split;
+	/** Which pane the floating layout shows (it's tabbed, not split). */
+	floatTab: 'css' | 'html';
+	/** DOM-tree expand/collapse overrides, keyed by node path. Absent = default
+	 *  (open to a shallow depth + the picked element's ancestors). A plain object,
+	 *  NOT a Set — setState's change-detection JSON-stringifies and a Set is `{}`. */
+	htmlToggled: Record<string, boolean>;
+	/** Whether the DOM-tree pane is shown. Off by default: building the tree on
+	 *  every render is the slow path, so it's opt-in via the header toggle. */
+	showHtml: boolean;
 }
 
 type SvgEl = HTMLElement & SVGElement;
 const ic = (size: number, vb: string, opts: ElProps, ...kids: SvgEl[]): SvgEl =>
 	el('svg', { width: size, height: size, viewBox: vb, ...opts }, ...kids);
 const pth = (d: string, opts?: ElProps): SvgEl => el('path', { d, ...(opts || {}) });
+/** DOMRect → plain {top,left,width,height} so it survives setState change-detection. */
+const toRect = (r: DOMRect): Rect => ({ top: r.top, left: r.left, width: r.width, height: r.height });
 
 // syntax colors
 const C_SEL = '#e8c98a', C_PROP = '#82aaff', C_PUNCT = '#5c5c66';
 const C_NUM = '#f0b86c', C_KW = '#c792ea', C_COLOR = '#dcdce4', C_TEXT = '#c9c9d4', C_FONT = '#7fd1c4';
+// DOM-tree row colors + default expand depth (root + its children open by default).
+const C_TAG = '#5c8bd6', C_ID = '#e8c98a', C_CLS = '#c792ea';
+const TREE_OPEN_DEPTH = 2;
 
 /** Equality for setState change-detection: identity, then a JSON fallback for the
  *  small plain objects we keep in state (focus/color/status/size/…). */
@@ -85,6 +109,9 @@ export class Panel {
 	private host: PanelHost;
 	private rootEl: HTMLElement;
 	private state: State;
+	/** The element last picked (page click or DOM-tree click) — selects its tree
+	 *  row and auto-expands its ancestors. Not in state; set alongside a pick. */
+	private pickedEl: Element | null = null;
 
 	// one global undo/redo timeline across every file edited this session
 	private history = new History<PickMeta | null>();
@@ -116,7 +143,8 @@ export class Panel {
 			colorHistory: [],
 			focus: null, color: null, menu: null, acIndex: 0,
 			status: { kind: 'idle', text: 'Pick an element to edit its styles' },
-			file: null, meta: null, rules: [], hl: null, focusPick: false
+			file: null, meta: null, rules: [], hl: null, focusPick: false,
+			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false
 		};
 
 		this.keyHandler = (e) => {
@@ -184,6 +212,8 @@ export class Panel {
 	private render(): void {
 		const prevBody = this.rootEl.querySelector('[data-sw-editor]') as HTMLElement | null;
 		const scrollTop = prevBody ? prevBody.scrollTop : 0;
+		const prevTree = this.rootEl.querySelector('[data-sw-tree]') as HTMLElement | null;
+		const treeScroll = prevTree ? prevTree.scrollTop : 0; // the DOM-tree pane scrolls independently
 		const caret = this.captureCaret(); // the rebuild destroys the focused input — keep its caret
 		this.nextPops = new Set(); // fresh set each render (don't clear the committed one — it's aliased)
 		// Tearing down the focused input fires a synthetic blur; flag the rebuild so the
@@ -195,6 +225,8 @@ export class Panel {
 		// layout; then flush refs (popover positioning) before the browser paints.
 		const body = this.rootEl.querySelector('[data-sw-editor]') as HTMLElement | null;
 		if (body) body.scrollTop = scrollTop;
+		const tree = this.rootEl.querySelector('[data-sw-tree]') as HTMLElement | null;
+		if (tree) tree.scrollTop = treeScroll; // don't snap the DOM tree back to the top on re-render
 		this.restoreFocus(caret);
 		this.rebuilding = false;
 		flushRefs();
@@ -261,8 +293,17 @@ export class Panel {
 	open(): void { this.setState({ view: this.state.file ? 'editing' : 'pick', hl: null }); }
 	hover(r: DOMRect, tag: string, file: string | null): void {
 		if (this.state.view !== 'pick') return;
-		this.setState({ hl: { r, tag, file } });
+		this.setState({ hl: { r: toRect(r), tag, file } });
 	}
+	/** Highlight a page element from a DOM-tree row hover. Unlike `hover` (the pick
+	 *  cursor), this works while the panel is open. */
+	private previewEl(elx: Element): void {
+		let r: Rect | null = null;
+		try { r = toRect(elx.getBoundingClientRect()); } catch { r = null; }
+		const file = resolveFile(elx);
+		this.setState({ hl: { r, tag: tagLabel(elx), file: file ? shortPath(file) : null } });
+	}
+	private clearPreview(): void { if (this.state.hl) this.setState({ hl: null }); }
 	private onFab(): void {
 		const v = this.state.view;
 		if (v === 'pick') this.setState({ view: this.state.file ? 'editing' : 'closed', hl: null });
@@ -291,6 +332,7 @@ export class Panel {
 		return c ? '.' + c : elx.tagName.toLowerCase();
 	}
 	async pick(file: string | null, meta: PickMeta | null, el?: Element | null): Promise<void> {
+		this.pickedEl = el || null; // selects this node's tree row + auto-expands its ancestors
 		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [] }); return; }
 		// Don't touch file/rules until the load resolves — set them atomically so
 		// the history records one clean baseline (not an old-rules/new-file blip).
@@ -1058,6 +1100,8 @@ export class Panel {
 			el('span', { style: 'flex:1;' }),
 			el('button', { className: 'sw-iconbtn', title: 'Pick another element', onClick: () => this.setState({ view: 'pick', hl: null }), style: 'display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;background:transparent;color:#9a9aa6;border-radius:6px;cursor:pointer;' },
 				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M12 2v3M12 19v3M2 12h3M19 12h3'), el('circle', { cx: 12, cy: 12, r: 4 }))),
+			el('button', { className: 'sw-iconbtn', title: this.state.showHtml ? 'Hide DOM tree' : 'Show DOM tree', onClick: () => this.setState({ showHtml: !this.state.showHtml }), style: `display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;border-radius:6px;cursor:pointer;background:${this.state.showHtml ? 'rgba(139,124,246,.2)' : 'transparent'};color:${this.state.showHtml ? '#c4baff' : '#9a9aa6'};` },
+				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3'))),
 			el('div', { style: 'display:flex;align-items:center;gap:2px;background:#101014;border:1px solid rgba(255,255,255,.07);border-radius:7px;padding:2px;' },
 				dockBtn('left', 'Dock left', el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 3.6, width: 4, height: 8.8, rx: 1, fill: 'currentColor' })),
 				dockBtn('bottom', 'Dock bottom', el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 9, width: 10.8, height: 3.4, rx: 1, fill: 'currentColor' })),
@@ -1114,10 +1158,129 @@ export class Panel {
 	}
 	private buildPanel(): SvgEl {
 		const v = this.state.view;
-		const body = v === 'no-meta' ? this.buildNoMeta() : v === 'no-style' ? this.buildNoStyle() : this.buildEditBody();
+		const cssPane = v === 'no-meta' ? this.buildNoMeta() : v === 'no-style' ? this.buildNoStyle() : this.buildEditBody();
 		const inner = el('div', { className: 'sw-scroll', style: 'display:flex;flex-direction:column;height:100%;background:#16161b;border:1px solid rgba(255,255,255,.1);border-radius:13px;overflow:hidden;box-shadow:0 24px 70px -20px rgba(0,0,0,.7),0 0 0 1px rgba(0,0,0,.4);color:#ececf1;' },
-			this.buildHeader(), body);
+			this.buildHeader(), this.buildBody(cssPane));
 		return el('div', { style: this.panelStyle() }, this.buildResizeHandles(), inner);
+	}
+
+	// ---------- CSS + DOM split body ----------
+	/** Arrange the CSS pane and the DOM-tree pane per dock: a column split (CSS top /
+	 *  HTML bottom) when docked left/right, a row split (HTML left / CSS right) when
+	 *  docked bottom, and a tabbed view when floating. */
+	private buildBody(cssPane: SvgEl): SvgEl {
+		// DOM pane off → CSS only, and crucially the tree isn't built at all (the
+		// per-render DOM walk is the slow part). cssPane is already a flex:1 column.
+		if (!this.state.showHtml) return cssPane;
+		const dock = this.state.dock;
+		const htmlPane = this.buildHtmlPane();
+		if (dock === 'float') {
+			const tab = this.state.floatTab;
+			return el('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0;' },
+				this.buildTabStrip(),
+				el('div', { style: 'flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;' }, tab === 'html' ? htmlPane : cssPane));
+		}
+		const sp = this.state.split;
+		if (dock === 'bottom') {
+			return el('div', { style: 'display:flex;flex-direction:row;flex:1;min-height:0;' },
+				el('div', { style: { flex: `0 0 ${(sp.row * 100).toFixed(2)}%`, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, htmlPane),
+				this.buildDivider('v'),
+				el('div', { style: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, cssPane));
+		}
+		return el('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0;' },
+			el('div', { style: { flex: `0 0 ${(sp.col * 100).toFixed(2)}%`, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, cssPane),
+			this.buildDivider('h'),
+			el('div', { style: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, htmlPane));
+	}
+	private buildTabStrip(): SvgEl {
+		const tab = this.state.floatTab;
+		const mk = (which: 'css' | 'html', label: string): SvgEl => el('button', {
+			onClick: () => this.setState({ floatTab: which }),
+			style: { flex: 1, border: 0, borderBottom: `2px solid ${tab === which ? '#8b7cf6' : 'transparent'}`, background: 'transparent', color: tab === which ? '#ececf1' : '#7e7e8c', cursor: 'pointer', padding: '8px 0', fontFamily: '"IBM Plex Sans",sans-serif', fontSize: 12, fontWeight: 600, letterSpacing: '.04em' }
+		}, label);
+		return el('div', { style: 'display:flex;background:#15151a;border-bottom:1px solid rgba(255,255,255,.06);flex:none;' }, mk('css', 'CSS'), mk('html', 'DOM'));
+	}
+	/** Draggable divider between the two panes. `h` = horizontal bar (column split),
+	 *  `v` = vertical bar (row split). */
+	private buildDivider(axis: 'h' | 'v'): SvgEl {
+		const horizontal = axis === 'h';
+		const grip = el('span', { style: { position: 'absolute', background: '#8b7cf6', borderRadius: 3, opacity: 0, transition: 'opacity .12s', ...(horizontal ? { left: '50%', marginLeft: -15, top: 3, height: 3, width: 30 } : { top: '50%', marginTop: -15, left: 3, width: 3, height: 30 }) } });
+		return el('div', {
+			onMouseDown: this.startSplitDrag(axis),
+			onMouseEnter: (e: MouseEvent) => { const g = (e.currentTarget as HTMLElement).firstChild as HTMLElement | null; if (g) g.style.opacity = '1'; },
+			onMouseLeave: (e: MouseEvent) => { const g = (e.currentTarget as HTMLElement).firstChild as HTMLElement | null; if (g) g.style.opacity = '0'; },
+			style: { position: 'relative', flex: 'none', background: '#15151a', cursor: horizontal ? 'ns-resize' : 'ew-resize', ...(horizontal ? { height: 9, width: '100%', borderTop: '1px solid rgba(255,255,255,.06)', borderBottom: '1px solid rgba(255,255,255,.06)' } : { width: 9, height: '100%', borderLeft: '1px solid rgba(255,255,255,.06)', borderRight: '1px solid rgba(255,255,255,.06)' }) }
+		}, grip);
+	}
+	private startSplitDrag(axis: 'h' | 'v') {
+		return (e: MouseEvent): void => {
+			e.preventDefault(); e.stopPropagation();
+			const container = (e.currentTarget as HTMLElement).parentElement;
+			if (!container) return;
+			const rect = container.getBoundingClientRect();
+			const mv = (ev: MouseEvent): void => {
+				if (axis === 'h') this.setState({ split: { ...this.state.split, col: this.clampN((ev.clientY - rect.top) / (rect.height || 1), 0.2, 0.85) } });
+				else this.setState({ split: { ...this.state.split, row: this.clampN((ev.clientX - rect.left) / (rect.width || 1), 0.2, 0.85) } });
+			};
+			const up = (): void => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+			document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+		};
+	}
+
+	// ---------- DOM tree pane ----------
+	private buildHtmlPane(): SvgEl {
+		return el('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0;background:#101014;' },
+			el('div', { style: 'display:flex;align-items:center;gap:8px;padding:8px 12px;background:#15151a;border-bottom:1px solid rgba(255,255,255,.06);flex:none;' },
+				ic(13, '0 0 24 24', { fill: 'none', stroke: C_FONT, strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3')),
+				el('span', { style: 'font-family:"IBM Plex Sans",sans-serif;font-size:11px;font-weight:700;letter-spacing:.12em;color:#7e7e8c;' }, 'DOM'),
+				el('span', { style: 'flex:1;' }),
+				el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#5c5c66;white-space:nowrap;' }, 'hover → highlight · click → edit')),
+			el('div', { className: 'sw-scroll', 'data-sw-tree': '1', style: 'flex:1;min-height:0;overflow:auto;padding:6px 2px 12px;' }, this.buildTree()));
+	}
+	private buildTree(): SvgEl {
+		let body: Element | null = null;
+		try { body = document.body; } catch { body = null; }
+		if (!body) return el('div', { style: 'padding:14px;color:#7e7e8c;font-size:12px;font-family:"IBM Plex Mono",monospace;' }, 'No document body.');
+		const { roots, byEl } = buildDomTree(body, this.shadow.host as Element);
+		const pickedNode = this.pickedEl ? byEl.get(this.pickedEl) : undefined;
+		const autoOpen = pickedNode ? pathPrefixes(pickedNode.path) : new Set<string>();
+		const out: SvgEl[] = [];
+		for (const r of roots) this.renderTreeNode(r, 0, autoOpen, out);
+		return el('div', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '11.5px', lineHeight: '1.7' } }, out);
+	}
+	private renderTreeNode(node: DomNode, depth: number, autoOpen: Set<string>, out: SvgEl[]): void {
+		const hasKids = node.children.length > 0;
+		const open = this.isNodeOpen(node.path, depth, autoOpen);
+		out.push(this.treeRow(node, depth, hasKids, open));
+		if (hasKids && open) for (const c of node.children) this.renderTreeNode(c, depth + 1, autoOpen, out);
+	}
+	private isNodeOpen(path: string, depth: number, autoOpen: Set<string>): boolean {
+		const t = this.state.htmlToggled;
+		if (Object.prototype.hasOwnProperty.call(t, path)) return t[path];
+		return autoOpen.has(path) || depth < TREE_OPEN_DEPTH;
+	}
+	private toggleNode(path: string, open: boolean): void {
+		this.setState({ htmlToggled: { ...this.state.htmlToggled, [path]: !open } });
+	}
+	private treeRow(node: DomNode, depth: number, hasKids: boolean, open: boolean): SvgEl {
+		const selected = this.pickedEl === node.el;
+		const indent = 8 + depth * 12;
+		const caret = hasKids
+			? el('button', {
+				title: open ? 'Collapse' : 'Expand', onClick: (e: MouseEvent) => { e.stopPropagation(); this.toggleNode(node.path, open); },
+				style: { flex: 'none', width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', border: 0, background: 'transparent', color: '#6a6a78', cursor: 'pointer', padding: 0, transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .1s' }
+			}, ic(9, '0 0 24 24', { fill: 'currentColor' }, pth('M9 6l6 6-6 6Z')))
+			: el('span', { style: { flex: 'none', width: 14, height: 14, display: 'inline-block' } });
+		const parts: (SvgEl | null)[] = [el('span', { style: { color: C_TAG } }, node.tag)];
+		if (node.id) parts.push(el('span', { style: { color: C_ID } }, '#' + node.id));
+		if (node.classes.length) parts.push(el('span', { style: { color: C_CLS } }, '.' + node.classes.join('.')));
+		if (node.ownsFile && node.fileLabel) parts.push(el('span', { title: node.file || '', style: { marginLeft: 6, color: C_FONT, opacity: 0.7, fontSize: '9.5px', whiteSpace: 'nowrap' } }, node.fileLabel));
+		return el('div', {
+			onClick: () => { void this.pick(node.file, describe(node.el), node.el); },
+			onMouseEnter: (e: MouseEvent) => { this.previewEl(node.el); (e.currentTarget as HTMLElement).style.background = selected ? 'rgba(139,124,246,.28)' : 'rgba(255,255,255,.05)'; },
+			onMouseLeave: (e: MouseEvent) => { this.clearPreview(); (e.currentTarget as HTMLElement).style.background = selected ? 'rgba(139,124,246,.2)' : 'transparent'; },
+			style: { display: 'flex', alignItems: 'center', gap: 4, padding: '1px 8px 1px ' + indent + 'px', whiteSpace: 'nowrap', cursor: 'pointer', borderRadius: 4, background: selected ? 'rgba(139,124,246,.2)' : 'transparent' }
+		}, caret, ...parts);
 	}
 	private buildFab(): SvgEl {
 		const v = this.state.view;
@@ -1147,7 +1310,7 @@ export class Panel {
 		const v = this.state.view;
 		if (v === 'pick') { const hlEl = this.buildHighlight(); if (hlEl) frag.appendChild(hlEl); frag.appendChild(this.buildHint()); }
 		if (v === 'pick' || v === 'closed') frag.appendChild(this.buildFab());
-		else frag.appendChild(this.buildPanel());
+		else { frag.appendChild(this.buildPanel()); const hlEl = this.buildHighlight(); if (hlEl) frag.appendChild(hlEl); }
 		return frag;
 	}
 }

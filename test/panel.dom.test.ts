@@ -354,3 +354,58 @@ describe('Panel: focus the picked element', () => {
 		expect(text).not.toContain('.other');
 	});
 });
+
+describe('Panel: DOM tree pane', () => {
+	const pickableRow = (s: ShadowRoot, needle: string) =>
+		[...s.querySelectorAll('div')].find((d) => d.style.cursor === 'pointer' && (d.textContent || '').includes(needle))!;
+	// the header toggle's title flips Show/Hide — both end with "DOM tree"
+	const toggleTree = (s: ShadowRoot) =>
+		[...s.querySelectorAll('button')].find((b) => /DOM tree$/.test(b.title))!.dispatchEvent(new MouseEvent('click'));
+
+	it('is hidden by default and the header toggle shows/hides it', async () => {
+		document.body.appendChild(Object.assign(document.createElement('div'), { className: 'widget' }));
+		const ctx = makePanel();
+		await ctx.panel.pick('Button.svelte', META);
+		await tick();
+		expect(ctx.shadow.textContent || '').not.toContain('highlight'); // pane off by default
+		toggleTree(ctx.shadow); await tick();
+		expect(ctx.shadow.textContent || '').toContain('highlight'); // shown (pane header text)
+		toggleTree(ctx.shadow); await tick();
+		expect(ctx.shadow.textContent || '').not.toContain('highlight'); // hidden again
+	});
+
+	it('renders the page element tree; a row click picks that element', async () => {
+		const card = document.createElement('div'); card.className = 'card';
+		const cta = document.createElement('button'); cta.className = 'cta';
+		(cta as unknown as { __svelte_meta?: unknown }).__svelte_meta = { loc: { file: 'src/lib/Cta.svelte' } };
+		card.appendChild(cta); document.body.appendChild(card);
+		const ctx = makePanel([{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] }]);
+		await ctx.panel.pick('Button.svelte', META); // open the panel (no element → tree default-expanded)
+		await tick();
+		toggleTree(ctx.shadow); await tick(); // DOM pane is off by default
+		const text = ctx.shadow.textContent || '';
+		expect(text).toContain('DOM');   // pane header
+		expect(text).toContain('.card'); // tree row for the card
+		expect(text).toContain('.cta');  // and its child button
+		// clicking the .cta row picks it and loads its component
+		pickableRow(ctx.shadow, '.cta').dispatchEvent(new MouseEvent('click'));
+		await tick();
+		const state = (ctx.panel as unknown as { state: { file: string | null; view: string } }).state;
+		expect(state.file).toBe('src/lib/Cta.svelte');
+		expect(state.view).toBe('editing');
+	});
+
+	it('hovering a tree row sets a page highlight', async () => {
+		const hero = document.createElement('section'); hero.className = 'hero';
+		document.body.appendChild(hero);
+		const ctx = makePanel();
+		await ctx.panel.pick('Button.svelte', META);
+		await tick();
+		toggleTree(ctx.shadow); await tick(); // DOM pane is off by default
+		pickableRow(ctx.shadow, '.hero').dispatchEvent(new MouseEvent('mouseenter'));
+		await tick();
+		const hl = (ctx.panel as unknown as { state: { hl: { tag: string } | null } }).state.hl;
+		expect(hl).toBeTruthy();
+		expect(hl!.tag).toContain('section'); // tagLabel of the hovered element
+	});
+});

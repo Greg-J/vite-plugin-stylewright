@@ -7,43 +7,11 @@
 // This module owns booting + the real element picker; the Panel owns the UI.
 
 import type { SwRule, SwRulesResponse, SwStyleSaveResponse, SwApplyResponse } from '../shared/protocol.js';
-import { Panel, type PanelHost, type PickMeta } from './panel.js';
+import { Panel, type PanelHost } from './panel.js';
+import { describe, resolveFile, shortPath, tagLabel } from './inspect.js';
 import { ensureFonts, SHADOW_CSS } from './theme.js';
 
 const PREFIX = '/__stylewright';
-
-/** Nearest source file above an element, from Svelte's dev metadata. */
-function resolveFile(node: Element | null): string | null {
-	let cur: (Element & { __svelte_meta?: { loc?: { file?: string } } }) | null = node;
-	while (cur && cur !== document.documentElement) {
-		const file = cur.__svelte_meta?.loc?.file;
-		if (file) return file;
-		cur = cur.parentElement;
-	}
-	return null;
-}
-
-function shortPath(file: string): string {
-	return file.replace(/\\/g, '/').split('/').slice(-2).join('/');
-}
-
-/** "<button class=\"btn primary\">" — the element's opening tag, for display. */
-function tagLabel(node: Element): string {
-	const tag = node.tagName.toLowerCase();
-	const cls = (node.getAttribute('class') || '').trim();
-	return '<' + tag + (cls ? ` class="${cls}"` : '') + '>';
-}
-
-function describe(node: Element): PickMeta {
-	const r = node.getBoundingClientRect();
-	const cls = (node.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean);
-	return {
-		fileLabel: '',
-		selectorLabel: cls.length ? '.' + cls[0] : node.tagName.toLowerCase(),
-		dims: Math.round(r.width) + ' × ' + Math.round(r.height),
-		tag: tagLabel(node)
-	};
-}
 
 const serverHost: PanelHost = {
 	async loadRules(file) {
@@ -111,8 +79,7 @@ function boot(): void {
 		e.preventDefault();
 		e.stopPropagation();
 		const file = resolveFile(node);
-		const meta = describe(node);
-		if (file) meta.fileLabel = shortPath(file);
+		const meta = describe(node); // fills fileLabel from the resolved component
 		void panel.pick(file, meta, node);
 	}, true);
 }
