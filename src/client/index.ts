@@ -19,11 +19,11 @@ const serverHost: PanelHost = {
 		const data = (await res.json()) as SwRulesResponse;
 		return { hasStyle: data.hasStyle, rules: data.rules, error: data.error };
 	},
-	async applyRules(file: string, rules: SwRule[]) {
+	async applyRules(file: string, rules: SwRule[], opts?: { removeIds?: number[]; mediaRenames?: { id: number; params: string }[] }) {
 		const res = await fetch(`${PREFIX}/apply`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ file, rules })
+			body: JSON.stringify({ file, rules, removeIds: opts?.removeIds, mediaRenames: opts?.mediaRenames })
 		});
 		return (await res.json()) as SwApplyResponse;
 	},

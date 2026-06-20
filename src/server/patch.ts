@@ -116,6 +116,16 @@ export interface ApplyRulesResult {
 	changed: boolean;
 	/** How many incoming rules were matched to a source rule by id. */
 	matched: number;
+	/** Phase 4 structural-op counts. */
+	created: number;
+	removed: number;
+	renamed: number;
+}
+
+/** Phase 4 structural operations (see SwApplyRequest). */
+export interface ApplyRulesOpts {
+	removeIds?: number[];
+	mediaRenames?: { id: number; params: string }[];
 }
 
 /**
@@ -125,18 +135,24 @@ export interface ApplyRulesResult {
  * every untouched rule are preserved exactly. This replaces the flat whole-block
  * serialize (which flattened at-rules into top-level rules — silent data loss).
  *
- * Phase 1 patches existing rules' declarations only (the panel edits/adds/removes
- * declarations within rules, never whole rules). Creating/removing rules — e.g. the
- * "add a responsive override" affordance — comes later.
+ * Phase 4 adds structural ops on top of the declaration patch:
+ *  - a rule in `rules` with NO `id` is CREATED into the @media block named by its
+ *    `media` (the block is created if absent) — "add a responsive override";
+ *  - `opts.removeIds` deletes rules and prunes an emptied @media wrapper;
+ *  - `opts.mediaRenames` rewrites the params of the @media enclosing a rule id.
+ * The id map is built ONCE up front (walk order, mirroring readRules), so removes/
+ * renames/patches all act on stable node references; creates append last. After any
+ * structural change the client re-fetches, because ids shift.
  */
-export function applyRules(source: string, rules: SwRule[]): ApplyRulesResult {
+export function applyRules(source: string, rules: SwRule[], opts: ApplyRulesOpts = {}): ApplyRulesResult {
+	const empty = { code: source, changed: false, matched: 0, created: 0, removed: 0, renamed: 0 };
 	const block = findStyleBlock(source);
-	if (!block) return { code: source, changed: false, matched: 0 };
+	if (!block) return empty;
 	let root: postcss.Root;
 	try {
 		root = postcss.parse(block.css);
 	} catch {
-		return { code: source, changed: false, matched: 0 };
+		return empty;
 	}
 
 	// Map each surfaced rule's stable id (walk-order ordinal, skipping @keyframes
@@ -149,22 +165,86 @@ export function applyRules(source: string, rules: SwRule[]): ApplyRulesResult {
 		idMap.set(id, node);
 	});
 
-	let changed = false;
-	let matched = 0;
+	let changed = false, matched = 0, created = 0, removed = 0, renamed = 0;
+	const removeSet = new Set(opts.removeIds || []);
+
+	// 1) media renames — change the enclosing @media params (moves the whole block).
+	for (const ren of opts.mediaRenames || []) {
+		const node = idMap.get(ren.id);
+		const at = node?.parent;
+		if (at && at.type === 'atrule' && (at as postcss.AtRule).name.toLowerCase() === 'media') {
+			const next = String(ren.params).trim();
+			if ((at as postcss.AtRule).params.trim() !== next) { (at as postcss.AtRule).params = next; renamed++; changed = true; }
+		}
+	}
+
+	// 2) removes — delete the rule, prune an emptied @media wrapper.
+	for (const id of removeSet) {
+		const node = idMap.get(id);
+		if (!node) continue;
+		const at = node.parent;
+		node.remove();
+		removed++; changed = true;
+		if (at && at.type === 'atrule') {
+			const atr = at as postcss.AtRule;
+			if (!atr.nodes || atr.nodes.length === 0) atr.remove();
+		}
+	}
+
+	// 3) patches — existing rules' declarations (skip anything we removed).
 	for (const r of rules) {
-		if (typeof r.id !== 'number') continue; // Phase 1: patch existing rules only
+		if (typeof r.id !== 'number' || removeSet.has(r.id)) continue;
 		const node = idMap.get(r.id);
 		if (!node) continue;
 		matched++;
 		if (reconcileDecls(node, r.decls)) changed = true;
 	}
 
-	if (!changed) return { code: source, changed: false, matched };
+	// 4) creates — id-less rules, into the matching @media (created if needed).
+	for (const r of rules) {
+		if (typeof r.id === 'number') continue;
+		const sel = normalizeSelector(r.selector || '');
+		if (!sel) continue;
+		const newRule = postcss.rule({ selector: sel });
+		for (const d of (r.decls || [])) {
+			if (d.prop?.trim() && d.value?.trim()) newRule.append({ prop: d.prop.trim(), value: d.value.trim() });
+		}
+		insertRule(root, newRule, (r.media || []).filter((m) => m.name));
+		created++; changed = true;
+	}
+
+	if (!changed) return { ...empty, matched };
 	const newCss = root.toString();
-	if (newCss === block.css) return { code: source, changed: false, matched };
+	if (newCss === block.css) return { ...empty, matched };
 	const ms = new MagicString(source);
 	ms.overwrite(block.start, block.end, newCss);
-	return { code: ms.toString(), changed: true, matched };
+	return { code: ms.toString(), changed: true, matched, created, removed, renamed };
+}
+
+/**
+ * Insert `rule` into the tree under the given @media chain (outermost first),
+ * reusing an existing block with identical name+params or creating one. With an
+ * empty chain the rule is appended at the top level.
+ */
+function insertRule(root: postcss.Root, rule: postcss.Rule, media: SwAtRule[]): void {
+	let parent: postcss.Container = root;
+	for (const m of media) {
+		const name = m.name.toLowerCase();
+		const params = String(m.params).trim();
+		let block: postcss.AtRule | null = null;
+		parent.each((n) => {
+			if (n.type === 'atrule' && (n as postcss.AtRule).name.toLowerCase() === name && String((n as postcss.AtRule).params).trim() === params) {
+				block = n as postcss.AtRule;
+				return false;
+			}
+		});
+		if (!block) {
+			block = postcss.atRule({ name: m.name, params });
+			parent.append(block);
+		}
+		parent = block;
+	}
+	parent.append(rule);
 }
 
 /**

@@ -293,10 +293,80 @@ describe('applyRules — structure-preserving save (the real fix)', () => {
 		expect(res.code).toBe(RICH);
 	});
 
-	it('ignores rules with no id / unknown id (never creates rules in Phase 1)', () => {
-		const res = applyRules(RICH, [{ selector: '.ghost', decls: [{ prop: 'color', value: 'red' }] }]);
+	it('ignores a rule whose numeric id is unknown (no patch, no create)', () => {
+		const res = applyRules(RICH, [{ id: 999, selector: '.ghost', decls: [{ prop: 'color', value: 'red' }] }]);
 		expect(res.changed).toBe(false);
 		expect(res.code).toBe(RICH);
+	});
+});
+
+describe('applyRules — Phase 4 structural ops (create / remove / rename)', () => {
+	it('creates a top-level rule from an id-less entry, preserving existing structure', () => {
+		const res = applyRules(RICH, [{ selector: '.ghost', decls: [{ prop: 'color', value: 'red' }] }]);
+		expect(res.changed).toBe(true);
+		expect(res.created).toBe(1);
+		expect(res.code).toContain('.ghost');
+		expect(res.code).toMatch(/color:\s*red/);
+		expect(res.code).toContain('@media (min-width: 768px)'); // untouched
+		expect(res.code).toContain('@keyframes spin'); // untouched
+	});
+
+	it('creates a responsive override INTO the matching @media block (reused, not duplicated)', () => {
+		const { rules } = readRules(RICH);
+		const newRule = { selector: '.hero', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'padding', value: '20px' }] };
+		const res = applyRules(RICH, [...rules, newRule]);
+		expect(res.created).toBe(1);
+		expect(res.code.match(/@media \(min-width: 768px\)/g)!.length).toBe(1); // still one wrapper
+		expect(res.code).toMatch(/padding:\s*20px/);
+		const heroResp = readRules(res.code).rules.filter((r) => r.selector === '.hero' && r.media);
+		expect(heroResp.length).toBe(2); // two overrides under that breakpoint now
+	});
+
+	it('creates a NEW @media block when none matches', () => {
+		const newRule = { selector: '.hero', media: [{ name: 'media', params: '(min-width: 1200px)' }], decls: [{ prop: 'color', value: 'gold' }] };
+		const res = applyRules(RICH, [newRule]);
+		expect(res.created).toBe(1);
+		expect(res.code).toContain('(min-width: 1200px)');
+		expect(res.code).toMatch(/color:\s*gold/);
+	});
+
+	it('removes a rule by id', () => {
+		const { rules } = readRules(RICH);
+		const top = rules.find((r) => r.selector === '.hero' && !r.media)!;
+		const res = applyRules(RICH, rules, { removeIds: [top.id as number] });
+		expect(res.removed).toBe(1);
+		expect(res.code).not.toMatch(/\.hero\s*{\s*color:\s*white/); // top-level .hero gone
+		expect(res.code).toContain('@media (min-width: 768px)'); // the override remains
+	});
+
+	it('prunes an emptied @media wrapper when its last rule is removed', () => {
+		const { rules } = readRules(RICH);
+		const resp = rules.find((r) => r.selector === '.hero' && r.media)!;
+		const res = applyRules(RICH, rules, { removeIds: [resp.id as number] });
+		expect(res.removed).toBe(1);
+		expect(res.code).not.toContain('@media (min-width: 768px)'); // empty wrapper pruned
+		expect(res.code).toContain('@keyframes spin'); // unrelated at-rule intact
+	});
+
+	it('renames the @media enclosing a rule id (moves the whole breakpoint)', () => {
+		const { rules } = readRules(RICH);
+		const resp = rules.find((r) => r.selector === '.hero' && r.media)!;
+		const res = applyRules(RICH, rules, { mediaRenames: [{ id: resp.id as number, params: '(min-width: 900px)' }] });
+		expect(res.renamed).toBe(1);
+		expect(res.code).toContain('(min-width: 900px)');
+		expect(res.code).not.toContain('(min-width: 768px)');
+		expect(res.code).toMatch(/@media[^}]*\.hero\s*{\s*color:\s*navy/); // rule still inside, value unchanged
+	});
+
+	it('combines a declaration patch with a create in one call', () => {
+		const { rules } = readRules(RICH);
+		const top = rules.find((r) => r.selector === '.hero' && !r.media)!;
+		top.decls = [{ prop: 'color', value: 'black' }];
+		const newRule = { selector: '.hero', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'padding', value: '4px' }] };
+		const res = applyRules(RICH, [...rules, newRule]);
+		expect(res.created).toBe(1);
+		expect(res.code).toMatch(/color:\s*black/); // patch landed
+		expect(res.code).toMatch(/padding:\s*4px/); // create landed
 	});
 });
 
