@@ -92,6 +92,8 @@ const ic = (size: number, vb: string, opts: ElProps, ...kids: SvgEl[]): SvgEl =>
 const pth = (d: string, opts?: ElProps): SvgEl => el('path', { d, ...(opts || {}) });
 /** DOMRect → plain {top,left,width,height} so it survives setState change-detection. */
 const toRect = (r: DOMRect): Rect => ({ top: r.top, left: r.left, width: r.width, height: r.height });
+/** Collapse insignificant whitespace so two source selectors compare equal. */
+const normSel = (s: string): string => s.replace(/\s+/g, ' ').trim();
 
 // syntax colors
 const C_SEL = '#e8c98a', C_PROP = '#82aaff', C_PUNCT = '#5c5c66';
@@ -928,6 +930,11 @@ export class Panel {
 				(kind === 'keyword' && mopen) ? this.keywordMenu(ri, di, d.p) : null));
 		}
 		left.push(el('span', { style: { color: C_PUNCT } }, ';'));
+		const ov = this.overriddenBy(ri, d.p);
+		if (ov) left.push(el('span', {
+			title: 'Overridden at the current width by ' + ov.full,
+			style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '9.5px', color: '#8a8a96', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 4, padding: '0 5px', lineHeight: '15px', alignSelf: 'center', marginLeft: 6, whiteSpace: 'nowrap', flex: 'none' }
+		}, '↓ ' + ov.label));
 		const trailing = el('input', {
 			className: 'sw-in', 'aria-label': 'insert declaration here', spellCheck: false, value: '',
 			onChange: () => { /* trailing zone is write-only via keydown */ },
@@ -950,7 +957,7 @@ export class Panel {
 			style: { border: 0, background: 'transparent', color: '#4b4b57', cursor: 'pointer', marginLeft: 4, opacity: 0, transition: 'opacity .1s', padding: 0, flex: 'none', alignSelf: 'center' }
 		}, ic(11, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round' }, pth('M5 5l14 14M19 5L5 19')));
 		return el('div', {
-			style: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', whiteSpace: 'pre', padding: '1px 4px 1px 4ch', borderRadius: 4, position: 'relative' },
+			style: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', whiteSpace: 'pre', padding: '1px 4px 1px 4ch', borderRadius: 4, position: 'relative', ...(ov ? { opacity: '0.72' } : {}) },
 			onMouseEnter: (e: MouseEvent) => { const t = e.currentTarget as HTMLElement; t.querySelectorAll<HTMLElement>('.sw-rm').forEach((b) => b.style.opacity = '1'); t.style.background = 'rgba(255,255,255,.03)'; },
 			onMouseLeave: (e: MouseEvent) => { const t = e.currentTarget as HTMLElement; t.querySelectorAll<HTMLElement>('.sw-rm').forEach((b) => b.style.opacity = '0'); t.style.background = 'transparent'; }
 		}, left, trailing, removeBtn);
@@ -984,6 +991,32 @@ export class Panel {
 	}
 	private ruleActive(rule: Rule): boolean {
 		return !rule.media || rule.media.every((m) => this.atRuleMatches(m));
+	}
+	/** If `prop` in rule `ri` is overridden at the CURRENT viewport by another ACTIVE
+	 *  rule with the same selector later in the cascade (typically a wider @media
+	 *  override that's winning), return that winner's label; else null. Same-selector
+	 *  only — equal specificity, so source order decides; the common breakpoint case. */
+	private overriddenBy(ri: number, prop: string): { label: string; full: string } | null {
+		const p = prop.trim();
+		if (!p) return null;
+		const rs = this.state.rules;
+		const base = rs[ri];
+		if (!base || !this.ruleActive(base)) return null; // inactive rules are dimmed wholesale already
+		const sel = normSel(base.sel);
+		const ord = (r: Rule, i: number) => (typeof r.id === 'number' ? r.id : i);
+		let winnerIdx = -1, winnerOrd = ord(base, ri);
+		rs.forEach((r, i) => {
+			if (i === ri || normSel(r.sel) !== sel || !this.ruleActive(r)) return;
+			if (!r.decls.some((d) => d.p.trim() === p && d.v.trim())) return;
+			const o = ord(r, i);
+			if (o > winnerOrd) { winnerIdx = i; winnerOrd = o; }
+		});
+		if (winnerIdx < 0) return null;
+		const w = rs[winnerIdx];
+		const hasMedia = !!(w.media && w.media.length);
+		const label = hasMedia ? w.media!.map((m) => this.shortMedia(m).replace('@media ', '')).join(' · ') : 'later rule';
+		const full = hasMedia ? w.media!.map((m) => `@${m.name} ${m.params}`).join(' ') : w.sel;
+		return { label, full };
 	}
 	/** Order rules by the document position of their matching element (top-to-bottom),
 	 *  so each @media override lands right under its base rule; same-element rules keep
