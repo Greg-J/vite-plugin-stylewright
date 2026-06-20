@@ -79,6 +79,11 @@ interface State {
 	/** Whether the DOM-tree pane is shown. Off by default: building the tree on
 	 *  every render is the slow path, so it's opt-in via the header toggle. */
 	showHtml: boolean;
+	/** Bumped only when the tree's CONTENT could change (pick, expand/collapse, show,
+	 *  manual refresh). buildTree caches its built node keyed by this, so a hover or a
+	 *  CSS keystroke (which re-render the panel) reuse the tree instead of rewalking
+	 *  the DOM. CSS edits never change DOM structure, so reuse is safe. */
+	treeRev: number;
 }
 
 type SvgEl = HTMLElement & SVGElement;
@@ -112,6 +117,9 @@ export class Panel {
 	/** The element last picked (page click or DOM-tree click) — selects its tree
 	 *  row and auto-expands its ancestors. Not in state; set alongside a pick. */
 	private pickedEl: Element | null = null;
+	/** Memoized DOM-tree node, reused across renders while `state.treeRev` is
+	 *  unchanged (a DOM node can be detached + re-appended, which `render()` does). */
+	private treeCache: { rev: number; node: SvgEl } | null = null;
 
 	// one global undo/redo timeline across every file edited this session
 	private history = new History<PickMeta | null>();
@@ -144,7 +152,7 @@ export class Panel {
 			focus: null, color: null, menu: null, acIndex: 0,
 			status: { kind: 'idle', text: 'Pick an element to edit its styles' },
 			file: null, meta: null, rules: [], hl: null, focusPick: false,
-			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false
+			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false, treeRev: 0
 		};
 
 		this.keyHandler = (e) => {
@@ -333,10 +341,11 @@ export class Panel {
 	}
 	async pick(file: string | null, meta: PickMeta | null, el?: Element | null): Promise<void> {
 		this.pickedEl = el || null; // selects this node's tree row + auto-expands its ancestors
-		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [] }); return; }
+		const treeRev = this.state.treeRev + 1; // the selection moved → rebuild the tree
+		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [], treeRev }); return; }
 		// Don't touch file/rules until the load resolves — set them atomically so
 		// the history records one clean baseline (not an old-rules/new-file blip).
-		this.setState({ view: 'editing', hl: null, status: { kind: 'saving', text: 'Loading ' + (meta ? meta.fileLabel : file) + ' …' } });
+		this.setState({ view: 'editing', hl: null, treeRev, status: { kind: 'saving', text: 'Loading ' + (meta ? meta.fileLabel : file) + ' …' } });
 		try {
 			const resp = await this.host.loadRules(file);
 			if (resp.error) { this.setState({ status: { kind: 'err', text: resp.error } }); return; }
@@ -1100,7 +1109,7 @@ export class Panel {
 			el('span', { style: 'flex:1;' }),
 			el('button', { className: 'sw-iconbtn', title: 'Pick another element', onClick: () => this.setState({ view: 'pick', hl: null }), style: 'display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;background:transparent;color:#9a9aa6;border-radius:6px;cursor:pointer;' },
 				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M12 2v3M12 19v3M2 12h3M19 12h3'), el('circle', { cx: 12, cy: 12, r: 4 }))),
-			el('button', { className: 'sw-iconbtn', title: this.state.showHtml ? 'Hide DOM tree' : 'Show DOM tree', onClick: () => this.setState({ showHtml: !this.state.showHtml }), style: `display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;border-radius:6px;cursor:pointer;background:${this.state.showHtml ? 'rgba(139,124,246,.2)' : 'transparent'};color:${this.state.showHtml ? '#c4baff' : '#9a9aa6'};` },
+			el('button', { className: 'sw-iconbtn', title: this.state.showHtml ? 'Hide DOM tree' : 'Show DOM tree', onClick: () => this.bumpTree({ showHtml: !this.state.showHtml }), style: `display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;border-radius:6px;cursor:pointer;background:${this.state.showHtml ? 'rgba(139,124,246,.2)' : 'transparent'};color:${this.state.showHtml ? '#c4baff' : '#9a9aa6'};` },
 				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3'))),
 			el('div', { style: 'display:flex;align-items:center;gap:2px;background:#101014;border:1px solid rgba(255,255,255,.07);border-radius:7px;padding:2px;' },
 				dockBtn('left', 'Dock left', el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 3.6, width: 4, height: 8.8, rx: 1, fill: 'currentColor' })),
@@ -1234,10 +1243,16 @@ export class Panel {
 				ic(13, '0 0 24 24', { fill: 'none', stroke: C_FONT, strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3')),
 				el('span', { style: 'font-family:"IBM Plex Sans",sans-serif;font-size:11px;font-weight:700;letter-spacing:.12em;color:#7e7e8c;' }, 'DOM'),
 				el('span', { style: 'flex:1;' }),
-				el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#5c5c66;white-space:nowrap;' }, 'hover → highlight · click → edit')),
+				el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#5c5c66;white-space:nowrap;' }, 'hover → highlight · click → edit'),
+				el('button', { className: 'sw-iconbtn', title: 'Rebuild tree from the live DOM', onClick: () => this.bumpTree(), style: 'display:flex;align-items:center;justify-content:center;width:20px;height:20px;border:0;background:transparent;color:#7e7e8c;border-radius:5px;cursor:pointer;flex:none;' },
+					ic(12, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M21 12a9 9 0 1 1-2.64-6.36'), pth('M21 3v6h-6')))),
 			el('div', { className: 'sw-scroll', 'data-sw-tree': '1', style: 'flex:1;min-height:0;overflow:auto;padding:6px 2px 12px;' }, this.buildTree()));
 	}
 	private buildTree(): SvgEl {
+		// Reuse the built node while the tree's content hasn't changed (hover + CSS
+		// edits re-render but don't bump treeRev). render() detaches it on clear and
+		// re-appends it, which is cheap; this skips the DOM walk + row construction.
+		if (this.treeCache && this.treeCache.rev === this.state.treeRev) return this.treeCache.node;
 		let body: Element | null = null;
 		try { body = document.body; } catch { body = null; }
 		if (!body) return el('div', { style: 'padding:14px;color:#7e7e8c;font-size:12px;font-family:"IBM Plex Mono",monospace;' }, 'No document body.');
@@ -1246,7 +1261,9 @@ export class Panel {
 		const autoOpen = pickedNode ? pathPrefixes(pickedNode.path) : new Set<string>();
 		const out: SvgEl[] = [];
 		for (const r of roots) this.renderTreeNode(r, 0, autoOpen, out);
-		return el('div', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '11.5px', lineHeight: '1.7' } }, out);
+		const node = el('div', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '11.5px', lineHeight: '1.7' } }, out);
+		this.treeCache = { rev: this.state.treeRev, node };
+		return node;
 	}
 	private renderTreeNode(node: DomNode, depth: number, autoOpen: Set<string>, out: SvgEl[]): void {
 		const hasKids = node.children.length > 0;
@@ -1259,8 +1276,13 @@ export class Panel {
 		if (Object.prototype.hasOwnProperty.call(t, path)) return t[path];
 		return autoOpen.has(path) || depth < TREE_OPEN_DEPTH;
 	}
+	/** Re-render with a freshly-built tree (invalidates the buildTree cache). `extra`
+	 *  folds in whatever state change triggered the rebuild. */
+	private bumpTree(extra: Partial<State> = {}): void {
+		this.setState({ treeRev: this.state.treeRev + 1, ...extra });
+	}
 	private toggleNode(path: string, open: boolean): void {
-		this.setState({ htmlToggled: { ...this.state.htmlToggled, [path]: !open } });
+		this.bumpTree({ htmlToggled: { ...this.state.htmlToggled, [path]: !open } });
 	}
 	private treeRow(node: DomNode, depth: number, hasKids: boolean, open: boolean): SvgEl {
 		const selected = this.pickedEl === node.el;

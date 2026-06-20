@@ -395,6 +395,27 @@ describe('Panel: DOM tree pane', () => {
 		expect(state.view).toBe('editing');
 	});
 
+	it('reuses the built tree on hover but rebuilds it on expand/collapse', async () => {
+		const outer = document.createElement('div'); outer.className = 'outer';
+		const inner = document.createElement('div'); inner.className = 'inner';
+		outer.appendChild(inner); document.body.appendChild(outer);
+		const ctx = makePanel();
+		await ctx.panel.pick('Button.svelte', META);
+		await tick();
+		toggleTree(ctx.shadow); await tick();
+		const treeNode = () => ctx.shadow.querySelector('[data-sw-tree]')!.firstElementChild;
+		const before = treeNode();
+		// hover changes only the highlight → the tree node must be REUSED
+		pickableRow(ctx.shadow, '.outer').dispatchEvent(new MouseEvent('mouseenter'));
+		await tick();
+		expect(treeNode()).toBe(before);
+		// expand/collapse changes the tree → it must be REBUILT (new node)
+		[...ctx.shadow.querySelectorAll('button')].find((b) => b.title === 'Collapse' || b.title === 'Expand')!
+			.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		expect(treeNode()).not.toBe(before);
+	});
+
 	it('hovering a tree row sets a page highlight', async () => {
 		const hero = document.createElement('section'); hero.className = 'hero';
 		document.body.appendChild(hero);
