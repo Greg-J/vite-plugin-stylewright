@@ -297,6 +297,38 @@ describe('Panel: @media awareness', () => {
 	});
 });
 
+describe('Panel: overridden-here flag', () => {
+	let origMM: typeof window.matchMedia;
+	beforeEach(() => { origMM = window.matchMedia; });
+	afterEach(() => { window.matchMedia = origMM; });
+	const stubMatch = (matches: boolean) => { (window as unknown as { matchMedia: () => unknown }).matchMedia = () => ({ matches }); };
+	const RESP = [
+		{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] },
+		{ id: 1, selector: '.btn', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'color', value: 'navy' }] }
+	];
+
+	it('flags a base decl overridden by an ACTIVE wider @media rule', async () => {
+		stubMatch(true);
+		const { shadow } = await openEditor(RESP);
+		expect(shadow.textContent || '').toContain('↓'); // the override chip
+	});
+
+	it('does not flag when the wider rule is INACTIVE at the current width', async () => {
+		stubMatch(false);
+		const { shadow } = await openEditor(RESP);
+		expect(shadow.textContent || '').not.toContain('↓');
+	});
+
+	it('does not flag when the override targets a DIFFERENT property', async () => {
+		stubMatch(true);
+		const { shadow } = await openEditor([
+			{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] },
+			{ id: 1, selector: '.btn', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'background', value: 'navy' }] }
+		]);
+		expect(shadow.textContent || '').not.toContain('↓');
+	});
+});
+
 describe('Panel: focus the picked element', () => {
 	it('shows only the clicked element’s rules, with a Show all toggle', async () => {
 		const btn = document.createElement('button');
