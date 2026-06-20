@@ -25,8 +25,10 @@ export type { PickMeta } from './inspect.js';
 export interface PanelHost {
 	loadRules(file: string): Promise<{ hasStyle: boolean; rules: SwRule[]; error?: string }>;
 	/** Structure-preserving save (POST /apply): patches the exact source rules,
-	 *  preserving @media/keyframes/comments. This is the save path the panel uses. */
-	applyRules(file: string, rules: SwRule[]): Promise<SwApplyResponse>;
+	 *  preserving @media/keyframes/comments. `opts` carries the Phase 4 structural ops
+	 *  (id-less rules in `rules` are created; removeIds delete; mediaRenames move a
+	 *  breakpoint). This is the save path the panel uses. */
+	applyRules(file: string, rules: SwRule[], opts?: { removeIds?: number[]; mediaRenames?: { id: number; params: string }[] }): Promise<SwApplyResponse>;
 	/** Legacy flat whole-block save (POST /style). Kept for back-compat; not used by
 	 *  the panel anymore because it can't represent at-rules. */
 	saveCss(file: string, css: string): Promise<SwStyleSaveResponse>;
@@ -90,6 +92,8 @@ interface State {
 	/** The live viewport width — tracked so a resize re-renders the breakpoint dimming
 	 *  in Live mode, and shown on the "Live" switcher chip. */
 	realW: number;
+	/** Rule index whose @media breakpoint is being edited inline (null = none). */
+	editBp: number | null;
 }
 
 type SvgEl = HTMLElement & SVGElement;
@@ -174,7 +178,7 @@ export class Panel {
 			status: { kind: 'idle', text: 'Pick an element to edit its styles' },
 			file: null, meta: null, rules: [], hl: null, focusPick: false,
 			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false, treeRev: 0,
-			whatIfWidth: null, realW: window.innerWidth
+			whatIfWidth: null, realW: window.innerWidth, editBp: null
 		};
 
 		this.keyHandler = (e) => {
@@ -385,21 +389,80 @@ export class Panel {
 			if (resp.error) { this.setState({ status: { kind: 'err', text: resp.error } }); return; }
 			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); return; }
 			const rules = fromServerRules(resp.rules);
-			// Focus on what you clicked. If the exact element matches no rule (a bare
-			// <span>/<div> with no class — common in rich nested components), climb to
-			// the nearest styled ancestor so a click always lands somewhere useful.
-			let target: Element | null = el || null;
-			let ris = target ? this.rulesForElement(target, rules) : new Set<number>();
-			for (let hops = 0; target && ris.size === 0 && hops < 8; hops++) {
-				target = target.parentElement;
-				if (target) ris = this.rulesForElement(target, rules);
-			}
-			this.pickedRis = ris.size ? ris : null;
-			this.pickedLabel = this.pickedRis && target ? this.elLabel(target) : null;
+			this.computeFocus(rules);
 			this.setState({ file, meta, rules, focusPick: true, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
 		}
+	}
+	/** Compute the focus set (rules styling the picked element or its contents) for a
+	 *  freshly-loaded rule list. If the exact element matches no rule (a bare
+	 *  <span>/<div> — common in rich components), climb to the nearest styled ancestor
+	 *  so a pick always lands somewhere useful. */
+	private computeFocus(rules: Rule[]): void {
+		let target: Element | null = this.pickedEl;
+		let ris = target ? this.rulesForElement(target, rules) : new Set<number>();
+		for (let hops = 0; target && ris.size === 0 && hops < 8; hops++) {
+			target = target.parentElement;
+			if (target) ris = this.rulesForElement(target, rules);
+		}
+		this.pickedRis = ris.size ? ris : null;
+		this.pickedLabel = this.pickedRis && target ? this.elLabel(target) : null;
+	}
+	/** Re-fetch the current file's rules after a STRUCTURAL change (create/remove/
+	 *  rename shifts the walk-order ids), and recompute the focus set. */
+	private async reloadRules(okText: string): Promise<void> {
+		const file = this.state.file;
+		if (!file) return;
+		try {
+			const resp = await this.host.loadRules(file);
+			if (resp.error || !resp.hasStyle) { this.setState({ status: { kind: 'err', text: resp.error || 'No styles after change' } }); return; }
+			const rules = fromServerRules(resp.rules);
+			this.computeFocus(rules);
+			this.setState({ rules, focus: null, color: null, menu: null, editBp: null, status: { kind: 'ok', text: okText } });
+		} catch (err) {
+			this.setState({ status: { kind: 'err', text: 'Reload failed: ' + String(err) } });
+		}
+	}
+	/** Create a responsive @media override for rule `ri`'s selector (a new rule under a
+	 *  min-width breakpoint), then re-fetch. Width defaults to the largest existing
+	 *  breakpoint (else 768) — the user adjusts it via the editable @media chip. */
+	private async addOverride(ri: number): Promise<void> {
+		const file = this.state.file; const base = this.state.rules[ri];
+		if (!file || !base) return;
+		const { minW } = this.breakpoints();
+		const w = minW.length ? minW[minW.length - 1] : 768;
+		const newRule: SwRule = { selector: base.sel, media: [{ name: 'media', params: `(min-width: ${w}px)` }], decls: [] };
+		this.setState({ status: { kind: 'saving', text: 'Adding @media override …' } });
+		try {
+			const d = await this.host.applyRules(file, toServerRules(this.state.rules).concat([newRule]));
+			if (!d.ok) { this.setState({ status: { kind: 'err', text: d.error || 'Failed to add override' } }); return; }
+			await this.reloadRules(`Added override · edit the ≥${w} chip to set its width`);
+		} catch (err) { this.setState({ status: { kind: 'err', text: 'Failed: ' + String(err) } }); }
+	}
+	/** Delete rule `ri` from the source (and prune an emptied @media), then re-fetch. */
+	private async removeRule(ri: number): Promise<void> {
+		const file = this.state.file; const r = this.state.rules[ri];
+		if (!file || !r || typeof r.id !== 'number') return;
+		this.setState({ status: { kind: 'saving', text: 'Removing rule …' } });
+		try {
+			const d = await this.host.applyRules(file, toServerRules(this.state.rules), { removeIds: [r.id] });
+			if (!d.ok) { this.setState({ status: { kind: 'err', text: d.error || 'Failed to remove' } }); return; }
+			await this.reloadRules('Removed rule');
+		} catch (err) { this.setState({ status: { kind: 'err', text: 'Failed: ' + String(err) } }); }
+	}
+	/** Change rule `ri`'s @media breakpoint width — renames the whole block (every rule
+	 *  under it moves), then re-fetch. */
+	private async commitBreakpoint(ri: number, width: number): Promise<void> {
+		const file = this.state.file; const r = this.state.rules[ri];
+		if (!file || !r || typeof r.id !== 'number' || !r.media || !r.media.length) { this.setState({ editBp: null }); return; }
+		const params = r.media[0].params.replace(/([\d.]+)px/, width + 'px');
+		this.setState({ editBp: null, status: { kind: 'saving', text: 'Updating breakpoint …' } });
+		try {
+			const d = await this.host.applyRules(file, toServerRules(this.state.rules), { mediaRenames: [{ id: r.id, params }] });
+			if (!d.ok) { this.setState({ status: { kind: 'err', text: d.error || 'Failed to update breakpoint' } }); return; }
+			await this.reloadRules(`Breakpoint → ${params}`);
+		} catch (err) { this.setState({ status: { kind: 'err', text: 'Failed: ' + String(err) } }); }
 	}
 
 	// ---------- global undo / redo (one timeline across every file) ----------
@@ -1103,11 +1166,56 @@ export class Panel {
 			}
 		}, label);
 	}
-	private ruleHeaderLine(rule: Rule): SvgEl {
+	private ruleHeaderLine(rule: Rule, ri: number): SvgEl {
+		const hasMedia = !!(rule.media && rule.media.length);
+		const widthBased = hasMedia && !!parseWidthQuery(rule.media![0].params);
+		const editing = this.state.editBp === ri;
+		let mediaEl: SvgEl | null = null;
+		if (hasMedia) {
+			if (editing && widthBased) mediaEl = this.bpInput(ri, rule);
+			else if (widthBased) mediaEl = el('button', { className: 'sw-pop-trigger', title: 'Edit this breakpoint (moves every rule under it)', onClick: () => this.setState({ editBp: ri, focus: null, color: null, menu: null }), style: { border: 0, background: 'transparent', padding: 0, cursor: 'pointer', display: 'inline-flex' } }, this.mediaChip(rule.media!));
+			else mediaEl = this.mediaChip(rule.media!);
+		}
 		return el('div', { style: { display: 'flex', alignItems: 'baseline', gap: '7px', flexWrap: 'wrap', whiteSpace: 'pre', padding: '1px 0' } },
-			rule.media && rule.media.length ? this.mediaChip(rule.media) : null,
+			mediaEl,
 			el('span', { style: { color: C_SEL } }, rule.sel),
-			el('span', { style: { color: C_PUNCT } }, ' {'));
+			el('span', { style: { color: C_PUNCT } }, ' {'),
+			el('span', { style: { flex: '1' } }),
+			hasMedia ? this.removeRuleBtn(ri) : null);
+	}
+	/** Inline editor for a rule's @media min-width (Enter/blur commits, Esc cancels). */
+	private bpInput(ri: number, rule: Rule): SvgEl {
+		const cur = (rule.media![0].params.match(/([\d.]+)px/) || [])[1] || '768';
+		const commit = (e: Event): void => { const v = parseFloat((e.target as HTMLInputElement).value); if (v > 0) void this.commitBreakpoint(ri, v); else this.setState({ editBp: null }); };
+		return el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, alignSelf: 'center' } },
+			el('span', { style: { color: '#8a8a96', fontSize: '10px', fontFamily: '"IBM Plex Mono",monospace' } }, '@media ≥'),
+			el('input', {
+				className: 'sw-in', value: cur, spellCheck: false,
+				ref: (n: HTMLElement) => setTimeout(() => { const i = n as HTMLInputElement; i.focus(); i.select(); }, 0),
+				style: { width: '5ch', color: '#c4baff', fontFamily: '"IBM Plex Mono",monospace', fontSize: '11px', background: '#101014', border: '1px solid rgba(139,124,246,.4)', borderRadius: 4, padding: '1px 4px' },
+				onKeyDown: (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); } else if (e.key === 'Escape') this.setState({ editBp: null }); },
+				onBlur: (e: Event) => { if (this.rebuilding) return; commit(e); }
+			}),
+			el('span', { style: { color: '#8a8a96', fontSize: '10px', fontFamily: '"IBM Plex Mono",monospace' } }, 'px'));
+	}
+	private removeRuleBtn(ri: number): SvgEl {
+		return el('button', {
+			title: 'Remove this rule', onClick: () => void this.removeRule(ri),
+			onMouseEnter: (e: MouseEvent) => (e.currentTarget as HTMLElement).style.color = '#f87171',
+			onMouseLeave: (e: MouseEvent) => (e.currentTarget as HTMLElement).style.color = '#5c5c66',
+			style: { border: 0, background: 'transparent', color: '#5c5c66', cursor: 'pointer', padding: '0 2px', flex: 'none', alignSelf: 'center' }
+		}, ic(11, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round' }, pth('M5 5l14 14M19 5L5 19')));
+	}
+	/** "+ @media override" — creates a responsive override for a base (non-media) rule. */
+	private addOverrideLine(ri: number): SvgEl {
+		return el('div', { style: { whiteSpace: 'pre', padding: '3px 0 0' } },
+			el('span', { style: { whiteSpace: 'pre' } }, '  '),
+			el('button', {
+				title: 'Add a responsive @media override for this selector', onClick: () => void this.addOverride(ri),
+				onMouseEnter: (e: MouseEvent) => { const t = e.currentTarget as HTMLElement; t.style.borderColor = 'rgba(139,124,246,.5)'; t.style.color = '#9d8cf8'; },
+				onMouseLeave: (e: MouseEvent) => { const t = e.currentTarget as HTMLElement; t.style.borderColor = 'rgba(255,255,255,.1)'; t.style.color = '#6a6a78'; },
+				style: { display: 'inline-flex', alignItems: 'center', gap: 5, border: '1px dashed rgba(255,255,255,.1)', background: 'transparent', color: '#6a6a78', fontFamily: '"IBM Plex Mono",monospace', fontSize: 10.5, padding: '2px 8px', borderRadius: 6, cursor: 'pointer' }
+			}, ic(10, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.6, strokeLinecap: 'round' }, pth('M12 5v14M5 12h14')), '@media override'));
 	}
 	/** Bar above the rules: "Focused on .x" with a Show all / Focus toggle. Only
 	 *  shown when the picked element matches some-but-not-all of the rules. */
@@ -1168,10 +1276,11 @@ export class Panel {
 			const rule = rs[ri];
 			const active = this.ruleActive(rule);
 			const isResp = !!(rule.media && rule.media.length);
-			const inner: SvgEl[] = [this.ruleHeaderLine(rule)];
+			const inner: SvgEl[] = [this.ruleHeaderLine(rule, ri)];
 			rule.decls.forEach((d, di) => inner.push(this.declLine(d, ri, di)));
 			inner.push(this.addLine(ri));
 			inner.push(el('div', { style: { whiteSpace: 'pre', padding: '1px 0' } }, el('span', { style: { color: C_PUNCT } }, '}')));
+			if (!isResp) inner.push(this.addOverrideLine(ri));
 			out.push(el('div', {
 				style: {
 					opacity: active ? '1' : '0.5',

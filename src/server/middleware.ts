@@ -261,9 +261,9 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 			}
 			try {
 				const source = await readFile(abs, 'utf8');
-				const result = applyRules(source, body.rules);
+				const result = applyRules(source, body.rules, { removeIds: body.removeIds, mediaRenames: body.mediaRenames });
 				if (result.changed) await writeFile(abs, result.code, 'utf8');
-				return sendJson(res, 200, { ok: true, changed: result.changed, matched: result.matched });
+				return sendJson(res, 200, { ok: true, changed: result.changed, matched: result.matched, created: result.created, removed: result.removed, renamed: result.renamed });
 			} catch (err) {
 				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
 			}

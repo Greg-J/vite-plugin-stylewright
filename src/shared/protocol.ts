@@ -104,6 +104,17 @@ export interface SwStyleSaveResponse {
 export interface SwApplyRequest {
 	file: string;
 	rules: SwRule[];
+	/**
+	 * Phase 4 structural ops (all keyed by the stable `id` from GET /rules; the client
+	 * re-fetches afterward because creating/removing shifts the walk-order ids):
+	 * - a rule in `rules` with NO `id` is CREATED (into the @media block named by its
+	 *   `media`, creating the block if absent) — the "add a responsive override" path.
+	 * - `removeIds` deletes those source rules (pruning a now-empty @media wrapper).
+	 * - `mediaRenames` rewrites the params of the @media enclosing each id — moving the
+	 *   whole breakpoint (every rule under it).
+	 */
+	removeIds?: number[];
+	mediaRenames?: { id: number; params: string }[];
 }
 
 /** Response to `POST /__stylewright/apply`. */
@@ -112,5 +123,9 @@ export interface SwApplyResponse {
 	changed: boolean;
 	/** How many incoming rules were matched to a source rule by id (diagnostic). */
 	matched?: number;
+	/** Phase 4 structural-op counts (diagnostic). */
+	created?: number;
+	removed?: number;
+	renamed?: number;
 	error?: string;
 }

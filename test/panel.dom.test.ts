@@ -42,10 +42,10 @@ function makePanel(rules: SwRule[] = RULES) {
 	const hostEl = document.createElement('div');
 	document.body.appendChild(hostEl);
 	const shadow = hostEl.attachShadow({ mode: 'open' });
-	const saved: { rules: SwRule[] | null } = { rules: null };
+	const saved: { rules: SwRule[] | null; opts: { removeIds?: number[]; mediaRenames?: { id: number; params: string }[] } | undefined } = { rules: null, opts: undefined };
 	const host: PanelHost = {
 		loadRules: async () => ({ hasStyle: true, rules }),
-		applyRules: async (_file, sent) => { saved.rules = sent; return { ok: true, changed: true }; },
+		applyRules: async (_file, sent, opts) => { saved.rules = sent; saved.opts = opts; return { ok: true, changed: true }; },
 		saveCss: async () => ({ ok: true, changed: true }) // legacy path, unused by the panel
 	};
 	const panel = new Panel(shadow, host);
@@ -293,7 +293,7 @@ describe('Panel: @media awareness', () => {
 
 	it('still renders a plain rule with no chip', async () => {
 		const { shadow } = await openEditor([{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] }]);
-		expect(shadow.textContent || '').not.toContain('@media');
+		expect(shadow.textContent || '').not.toContain('≥'); // no @media chip on a plain rule (the "+ @media override" button is expected)
 	});
 });
 
@@ -326,6 +326,48 @@ describe('Panel: overridden-here flag', () => {
 			{ id: 1, selector: '.btn', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'background', value: 'navy' }] }
 		]);
 		expect(shadow.textContent || '').not.toContain('↓');
+	});
+});
+
+describe('Panel: structural ops (Phase 4 — create / remove / edit breakpoint)', () => {
+	const TWO = [
+		{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] },
+		{ id: 1, selector: '.btn', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'color', value: 'navy' }] }
+	];
+
+	it('"+ @media override" sends an id-less rule carrying the base selector', async () => {
+		const ctx = makePanel([{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] }]);
+		await ctx.panel.pick('Button.svelte', META); await tick();
+		[...ctx.shadow.querySelectorAll('button')].find((b) => b.title.includes('responsive @media override'))!
+			.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		const created = ctx.saved.rules!.find((r) => r.id == null);
+		expect(created).toBeTruthy();
+		expect(created!.selector).toBe('.btn');
+		expect(created!.media?.[0].params).toContain('min-width');
+	});
+
+	it('the × on a responsive rule sends removeIds for that rule', async () => {
+		const ctx = makePanel(TWO);
+		await ctx.panel.pick('Button.svelte', META); await tick();
+		[...ctx.shadow.querySelectorAll('button')].find((b) => b.title === 'Remove this rule')!
+			.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		expect(ctx.saved.opts?.removeIds).toEqual([1]);
+	});
+
+	it('editing a breakpoint sends a mediaRename for that rule id', async () => {
+		const ctx = makePanel(TWO);
+		await ctx.panel.pick('Button.svelte', META); await tick();
+		[...ctx.shadow.querySelectorAll('button')].find((b) => b.title.includes('Edit this breakpoint'))!
+			.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		const input = [...ctx.shadow.querySelectorAll('input')].find((i) => (i as HTMLInputElement).value === '768') as HTMLInputElement;
+		expect(input).toBeTruthy();
+		input.value = '1024';
+		input.dispatchEvent(new Event('blur'));
+		await tick(); vi.advanceTimersByTime(10); await tick();
+		expect(ctx.saved.opts?.mediaRenames?.[0]).toEqual({ id: 1, params: '(min-width: 1024px)' });
 	});
 });
 
