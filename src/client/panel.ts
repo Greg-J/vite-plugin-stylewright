@@ -84,6 +84,12 @@ interface State {
 	 *  CSS keystroke (which re-render the panel) reuse the tree instead of rewalking
 	 *  the DOM. CSS edits never change DOM structure, so reuse is safe. */
 	treeRev: number;
+	/** What-if breakpoint preview: a width to evaluate @media against (editor-dimming
+	 *  only — it can't resize the real viewport). null = follow the live width. */
+	whatIfWidth: number | null;
+	/** The live viewport width — tracked so a resize re-renders the breakpoint dimming
+	 *  in Live mode, and shown on the "Live" switcher chip. */
+	realW: number;
 }
 
 type SvgEl = HTMLElement & SVGElement;
@@ -94,6 +100,17 @@ const pth = (d: string, opts?: ElProps): SvgEl => el('path', { d, ...(opts || {}
 const toRect = (r: DOMRect): Rect => ({ top: r.top, left: r.left, width: r.width, height: r.height });
 /** Collapse insignificant whitespace so two source selectors compare equal. */
 const normSel = (s: string): string => s.replace(/\s+/g, ' ').trim();
+/** Pull min-width / max-width pixel bounds from a media query's params. Returns null
+ *  for a non-width query (orientation, etc.) so the caller falls back to matchMedia. */
+function parseWidthQuery(params: string): { min?: number; max?: number } | null {
+	const min = params.match(/min-width:\s*([\d.]+)px/);
+	const max = params.match(/max-width:\s*([\d.]+)px/);
+	if (!min && !max) return null;
+	const out: { min?: number; max?: number } = {};
+	if (min) out.min = parseFloat(min[1]);
+	if (max) out.max = parseFloat(max[1]);
+	return out;
+}
 
 // syntax colors
 const C_SEL = '#e8c98a', C_PROP = '#82aaff', C_PUNCT = '#5c5c66';
@@ -139,6 +156,8 @@ export class Panel {
 	private keyHandler: (e: KeyboardEvent) => void;
 	private downHandler: (e: MouseEvent) => void;
 	private reanchorHandler: () => void;
+	private onResize: () => void;
+	private resizeRaf = 0;
 
 	constructor(shadow: ShadowRoot, host: PanelHost) {
 		this.shadow = shadow;
@@ -154,7 +173,8 @@ export class Panel {
 			focus: null, color: null, menu: null, acIndex: 0,
 			status: { kind: 'idle', text: 'Pick an element to edit its styles' },
 			file: null, meta: null, rules: [], hl: null, focusPick: false,
-			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false, treeRev: 0
+			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false, treeRev: 0,
+			whatIfWidth: null, realW: window.innerWidth
 		};
 
 		this.keyHandler = (e) => {
@@ -176,9 +196,19 @@ export class Panel {
 		// Keep an open popover glued to its trigger when the editor body scrolls or
 		// the window resizes — neither of which triggers a re-render on its own.
 		this.reanchorHandler = () => this.reanchorPopovers();
+		// In "Live" mode the breakpoint dimming follows the real viewport, so a resize
+		// needs a re-render. rAF-throttle it; a no-op while previewing a what-if width.
+		this.onResize = () => {
+			if (this.resizeRaf) return;
+			this.resizeRaf = requestAnimationFrame(() => {
+				this.resizeRaf = 0;
+				if (this.state.realW !== window.innerWidth) this.setState({ realW: window.innerWidth });
+			});
+		};
 		window.addEventListener('keydown', this.keyHandler);
 		document.addEventListener('mousedown', this.downHandler);
 		window.addEventListener('resize', this.reanchorHandler);
+		window.addEventListener('resize', this.onResize);
 		this.rootEl.addEventListener('scroll', this.reanchorHandler, true); // capture: scroll doesn't bubble
 		this.render();
 	}
@@ -187,6 +217,8 @@ export class Panel {
 		window.removeEventListener('keydown', this.keyHandler);
 		document.removeEventListener('mousedown', this.downHandler);
 		window.removeEventListener('resize', this.reanchorHandler);
+		window.removeEventListener('resize', this.onResize);
+		if (this.resizeRaf) cancelAnimationFrame(this.resizeRaf);
 		this.rootEl.removeEventListener('scroll', this.reanchorHandler, true);
 		clear(this.rootEl);
 	}
@@ -987,6 +1019,13 @@ export class Panel {
 	 *  other at-rules are treated as always-on so we don't dim them. */
 	private atRuleMatches(m: SwAtRule): boolean {
 		if (m.name.toLowerCase() !== 'media') return true;
+		const w = this.state.whatIfWidth;
+		if (w != null) {
+			const q = parseWidthQuery(m.params);
+			// Previewing a width: evaluate width queries against it; a non-width query
+			// (orientation, etc.) can't be simulated, so fall through to the real match.
+			if (q) return (q.min == null || w >= q.min) && (q.max == null || w <= q.max);
+		}
 		try { return window.matchMedia(m.params).matches; } catch { return true; }
 	}
 	private ruleActive(rule: Rule): boolean {
@@ -1084,6 +1123,37 @@ export class Panel {
 				style: { border: '1px solid rgba(139,124,246,.3)', background: 'rgba(139,124,246,.1)', color: '#c4baff', borderRadius: '5px', padding: '2px 9px', cursor: 'pointer', fontFamily: '"IBM Plex Mono",monospace', fontSize: '10.5px' }
 			}, btn));
 	}
+	/** Distinct width breakpoints used by the component's rules (min ascending, max descending). */
+	private breakpoints(): { minW: number[]; maxW: number[] } {
+		const minSet = new Set<number>(), maxSet = new Set<number>();
+		this.state.rules.forEach((r) => (r.media || []).forEach((m) => {
+			if (m.name.toLowerCase() !== 'media') return;
+			const q = parseWidthQuery(m.params);
+			if (q?.min != null) minSet.add(q.min);
+			if (q?.max != null) maxSet.add(q.max);
+		}));
+		return { minW: [...minSet].sort((a, b) => a - b), maxW: [...maxSet].sort((a, b) => b - a) };
+	}
+	/** A what-if breakpoint switcher built from the component's REAL @media widths. It
+	 *  re-evaluates which rules win at a chosen width (dimming only — it can't resize
+	 *  the real viewport). Hidden when the component has no width breakpoints. */
+	private buildSwitcher(): SvgEl | null {
+		const { minW, maxW } = this.breakpoints();
+		if (!minW.length && !maxW.length) return null;
+		const wi = this.state.whatIfWidth;
+		const chip = (label: string, active: boolean, w: number | null, title: string): SvgEl => el('button', {
+			title, onClick: () => this.setState({ whatIfWidth: w }),
+			style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '10px', lineHeight: '17px', padding: '0 8px', borderRadius: 5, cursor: 'pointer', whiteSpace: 'nowrap', flex: 'none', background: active ? 'rgba(139,124,246,.25)' : 'rgba(255,255,255,.04)', color: active ? '#c4baff' : '#9a9aa6', border: `1px solid ${active ? 'rgba(139,124,246,.5)' : 'rgba(255,255,255,.1)'}` }
+		}, label);
+		const chips: (SvgEl | null)[] = [chip(`Live · ${this.state.realW}px`, wi == null, null, 'Follow the real viewport width')];
+		if (minW.length) { const base = Math.max(0, minW[0] - 1); chips.push(chip('Base', wi === base, base, `Preview below ${minW[0]}px (no min-width overrides active)`)); }
+		minW.forEach((w) => chips.push(chip(`≥${w}`, wi === w, w, `Preview at ${w}px`)));
+		maxW.forEach((w) => chips.push(chip(`≤${w}`, wi === w, w, `Preview at ${w}px`)));
+		return el('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '0 4px 10px', marginBottom: 8, borderBottom: '1px solid rgba(255,255,255,.06)' } },
+			el('span', { style: { fontFamily: '"IBM Plex Sans",sans-serif', fontSize: '9px', fontWeight: 700, letterSpacing: '.12em', color: '#5c5c66', flex: 'none' } }, 'WIDTH'),
+			...chips,
+			wi != null ? el('span', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: '9.5px', color: '#8a8a96', flex: 'none' } }, '· preview only') : null);
+	}
 	private buildEditor(): SvgEl {
 		const rs = this.curRules();
 		const order = this.orderedView();
@@ -1092,6 +1162,8 @@ export class Panel {
 		const displayRis = focused ? order.filter((ri) => this.pickedRis!.has(ri)) : order;
 		const out: SvgEl[] = [];
 		if (canFocus) out.push(this.focusBar(focused, rs.length));
+		const switcher = this.buildSwitcher();
+		if (switcher) out.push(switcher);
 		displayRis.forEach((ri, idx) => {
 			const rule = rs[ri];
 			const active = this.ruleActive(rule);

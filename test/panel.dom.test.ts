@@ -329,6 +329,41 @@ describe('Panel: overridden-here flag', () => {
 	});
 });
 
+describe('Panel: breakpoint switcher', () => {
+	let origMM: typeof window.matchMedia;
+	beforeEach(() => { origMM = window.matchMedia; });
+	afterEach(() => { window.matchMedia = origMM; });
+	const RESP = [
+		{ id: 0, selector: '.btn', decls: [{ prop: 'padding', value: '8px' }] },
+		{ id: 1, selector: '.btn', media: [{ name: 'media', params: '(min-width: 768px)' }], decls: [{ prop: 'padding', value: '16px' }] }
+	];
+
+	it('shows Live + Base + a chip per real @media width', async () => {
+		const { shadow } = await openEditor(RESP);
+		const text = shadow.textContent || '';
+		expect(text).toContain('Live');
+		expect(text).toContain('Base');
+		expect(text).toContain('≥768');
+	});
+
+	it('has no switcher when the component has no width @media', async () => {
+		const { shadow } = await openEditor([{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'red' }] }]);
+		expect(shadow.textContent || '').not.toContain('WIDTH'); // the switcher's label
+	});
+
+	it('previews a chosen width without the real viewport (what-if dimming)', async () => {
+		(window as unknown as { matchMedia: () => unknown }).matchMedia = () => ({ matches: false }); // real width: @media inactive
+		const ctx = makePanel(RESP);
+		await ctx.panel.pick('Button.svelte', META); await tick();
+		expect(ctx.shadow.textContent || '').not.toContain('↓'); // Live + inactive → nothing overridden
+		[...ctx.shadow.querySelectorAll('button')].find((b) => (b.textContent || '') === '≥768' && b.title.includes('Preview'))!
+			.dispatchEvent(new MouseEvent('click'));
+		await tick();
+		expect((ctx.panel as unknown as { state: { whatIfWidth: number | null } }).state.whatIfWidth).toBe(768);
+		expect(ctx.shadow.textContent || '').toContain('↓'); // under what-if 768 the @media wins → base overridden
+	});
+});
+
 describe('Panel: focus the picked element', () => {
 	it('shows only the clicked element’s rules, with a Show all toggle', async () => {
 		const btn = document.createElement('button');
