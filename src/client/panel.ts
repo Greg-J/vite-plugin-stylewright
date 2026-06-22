@@ -56,6 +56,10 @@ interface State {
 	dock: Dock;
 	view: View;
 	float: FloatPos;
+	/** Launcher (FAB) position. {null,null} = default bottom-right anchor; once
+	 *  dragged, absolute viewport left/top px (clamped on render). In-memory like
+	 *  `float` — resets to the anchor on reload. */
+	fab: FloatPos;
 	size: Size;
 	colorHistory: string[];
 	focus: Focus | null;
@@ -122,6 +126,22 @@ const C_NUM = '#f0b86c', C_KW = '#c792ea', C_COLOR = '#dcdce4', C_TEXT = '#c9c9d
 // DOM-tree row colors + default expand depth (root + its children open by default).
 const C_TAG = '#5c8bd6', C_ID = '#e8c98a', C_CLS = '#c792ea';
 const TREE_OPEN_DEPTH = 2;
+// The FAB stays a plain click (pointer) cursor until you've hovered it this long —
+// only then does it reveal the grab hand, so it doesn't read as "always draggable".
+const FAB_GRAB_DELAY = 2000;
+// The dragged launcher position persists across reloads (the rest of the panel's
+// layout stays in-memory). Guarded so private-mode / disabled storage can't throw.
+const FAB_POS_KEY = '__stylewright_fab';
+function loadFabPos(): FloatPos {
+	try {
+		const raw = localStorage.getItem(FAB_POS_KEY);
+		if (raw) { const p = JSON.parse(raw) as FloatPos; if (typeof p.x === 'number' && typeof p.y === 'number') return { x: p.x, y: p.y }; }
+	} catch { /* storage unavailable — fall back to the default anchor */ }
+	return { x: null, y: null };
+}
+function saveFabPos(p: FloatPos): void {
+	try { localStorage.setItem(FAB_POS_KEY, JSON.stringify(p)); } catch { /* ignore */ }
+}
 
 /** Equality for setState change-detection: identity, then a JSON fallback for the
  *  small plain objects we keep in state (focus/color/status/size/…). */
@@ -151,6 +171,8 @@ export class Panel {
 	private programmaticFocus = false; // true while WE focus an input — onFocus skips its side-effects
 	private rebuilding = false; // true during render teardown — inputs' onBlur ignore the synthetic blur
 	private colorWasSeeded = false; // picker opened on an empty value and not yet touched — revert on close
+	private fabDragged = false; // a FAB mousedown crossed the drag threshold — suppresses the activate-on-release
+	private fabHoverTimer: ReturnType<typeof setTimeout> | undefined; // reveals the grab cursor only after a hover dwell
 	private renderQueued = false;
 	// animate-once: popovers shown in the previous render (don't replay their entry
 	// animation while they stay open — that's what made the color picker flicker).
@@ -172,6 +194,7 @@ export class Panel {
 			dock: 'right',
 			view: 'closed',
 			float: { x: null, y: null },
+			fab: loadFabPos(),
 			size: { side: 392, bottom: 300, floatW: 418, floatH: 540 },
 			colorHistory: [],
 			focus: null, color: null, menu: null, acIndex: 0,
@@ -354,6 +377,41 @@ export class Panel {
 		const v = this.state.view;
 		if (v === 'pick') this.setState({ view: this.state.file ? 'editing' : 'closed', hl: null });
 		else this.setState({ view: 'pick', hl: null });
+	}
+	/** Drag the launcher anywhere. A press that stays put (< the threshold) is a
+	 *  click → `onFab()`; once it crosses the threshold it's a drag → reposition.
+	 *  Activation fires on release (not via onClick) so a drag that ends off the
+	 *  button can't leave a stale flag that swallows the next real click. Mirrors
+	 *  `onHeaderDown`: getBoundingClientRect seeds the offset, so the first drag
+	 *  continues smoothly from wherever it's currently anchored. */
+	private onFabDown(e: MouseEvent): void {
+		if (e.button !== 0) return; // left button only
+		e.preventDefault(); // don't select page text mid-drag
+		clearTimeout(this.fabHoverTimer); // a press cancels the pending grab-cursor reveal
+		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const sx = e.clientX, sy = e.clientY, ox = r.left, oy = r.top, w = r.width, h = r.height;
+		this.fabDragged = false;
+		const mv = (ev: MouseEvent): void => {
+			const dx = ev.clientX - sx, dy = ev.clientY - sy;
+			if (!this.fabDragged && Math.abs(dx) + Math.abs(dy) < 4) return; // tolerate click jitter
+			if (!this.fabDragged) document.documentElement.style.cursor = 'grabbing';
+			this.fabDragged = true;
+			const x = Math.max(6, Math.min(window.innerWidth - w - 6, ox + dx));
+			const y = Math.max(6, Math.min(window.innerHeight - h - 6, oy + dy));
+			this.setState({ fab: { x, y } });
+		};
+		const up = (): void => {
+			document.documentElement.style.cursor = '';
+			document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+			if (!this.fabDragged) { this.onFab(); return; } // a press that never moved = a click
+			saveFabPos(this.state.fab); // remember where it was dropped, across reloads
+			// Drag ended: no re-render follows, so clear the grabbing cursor on the live
+			// button and the flag (else the next render would paint it grabbing again).
+			this.fabDragged = false;
+			const fab = this.rootEl.querySelector<HTMLElement>('.sw-fab');
+			if (fab) fab.style.cursor = '';
+		};
+		document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
 	}
 	/** Source-index set of rules to focus on (the picked element's rules); drives
 	 *  the "focus this element" filter. Null when nothing useful was picked. */
@@ -1522,7 +1580,18 @@ export class Panel {
 		const v = this.state.view;
 		const bg = v === 'pick' ? '#3a3550' : 'linear-gradient(135deg,#8b7cf6,#6d5efc)';
 		const ring = v === 'pick' ? ',0 0 0 3px rgba(139,124,246,.4)' : '';
-		return el('button', { className: 'sw-fab', title: 'Stylewright — pick an element', onClick: () => this.onFab(), style: `position:fixed;bottom:18px;right:18px;width:48px;height:48px;border-radius:50%;border:0;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:45;transition:transform .12s ease;color:#fff;background:${bg};box-shadow:0 10px 30px -8px rgba(109,94,252,.7)${ring};` },
+		const f = this.state.fab;
+		const pos = (f.x == null || f.y == null)
+			? 'bottom:18px;right:18px'
+			: `left:${Math.max(6, Math.min(window.innerWidth - 54, f.x))}px;top:${Math.max(6, Math.min(window.innerHeight - 54, f.y))}px`;
+		// While dragging, force grabbing (overrides the theme pointer); otherwise the
+		// cursor stays pointer until the hover-dwell timer promotes it to grab.
+		const cursor = this.fabDragged ? 'cursor:grabbing;' : '';
+		return el('button', { className: 'sw-fab', title: 'Stylewright — pick an element (drag to move)',
+			onMouseDown: (e: MouseEvent) => this.onFabDown(e),
+			onMouseEnter: (e: MouseEvent) => { const btn = e.currentTarget as HTMLElement; clearTimeout(this.fabHoverTimer); this.fabHoverTimer = setTimeout(() => { btn.style.cursor = 'grab'; }, FAB_GRAB_DELAY); },
+			onMouseLeave: (e: MouseEvent) => { clearTimeout(this.fabHoverTimer); (e.currentTarget as HTMLElement).style.cursor = ''; },
+			style: `position:fixed;${pos};width:48px;height:48px;border-radius:50%;border:0;${cursor}display:flex;align-items:center;justify-content:center;z-index:45;transition:transform .12s ease;color:#fff;background:${bg};box-shadow:0 10px 30px -8px rgba(109,94,252,.7)${ring};` },
 			ic(20, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M12 20h9'), pth('M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z')));
 	}
 	private buildHighlight(): SvgEl | null {
