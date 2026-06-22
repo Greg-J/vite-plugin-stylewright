@@ -14,6 +14,7 @@ export const SHADOW_CSS = `
 .sw-in { all: unset; font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 22px; min-width: 1ch; color: inherit; }
 .sw-in::selection { background: rgba(139,124,246,.35); }
 .sw-iconbtn:hover { background: rgba(255,255,255,.08) !important; color: #ececf1 !important; }
+.sw-fab { cursor: pointer; }
 .sw-fab:hover { transform: scale(1.06); }
 .sw-addstyle:hover { background: #5a4cf0 !important; }
 .sw-cand:hover { background: #22222a !important; border-color: rgba(139,124,246,.4) !important; }
