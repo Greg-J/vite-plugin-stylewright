@@ -57,7 +57,7 @@
 - **Why it matters:** `commitBreakpoint` computes the new params from `r.media[0]` (the OUTERMOST at-rule) and sends `mediaRenames:[{id,params}]`, but the server renames `node.parent` (the INNERMOST at-rule). For a single `@media` these coincide; for a nested chain (e.g. a width `@media` wrapping an orientation `@media`), the chip shows as editable (media[0] is width-based) but committing overwrites the inner media's params with the width string, dropping the orientation constraint. If the inner at-rule is `@supports` the rename silently no-ops (the guard requires `at.name === 'media'`). Rare in component `<style>`, hence P3, though it silently loses a media constraint in source.
 - **Fix:** Rename the specific at-rule node the client edited (pass the chain depth, or have the server walk up to the matching width `@media`) instead of always `node.parent`.
 
-### [COR-6] (P3) isColorValue accepts invalid 5- and 7-digit hex — Status: TODO
+### [COR-6] (P3) isColorValue accepts invalid 5- and 7-digit hex — Status: DONE
 - **Where:** `src/client/color.ts:49`
 - **Why it matters:** `/^#([0-9a-f]{3,8})$/i` matches hex of length 3–8 inclusive, but only 3/4/6/8 are valid CSS hex colors. A value like `#12345` or `#1234567` is classified as a color, opening the picker and routing through `parseColor`, which slices it blindly and yields a garbage color rather than treating it as plain text. Impact is minor: it only triggers on a hex literal that is already invalid CSS (a typo in the developer's own source); no crash, no data loss.
 - **Fix:** Restrict to exact lengths, e.g. `/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i`.
