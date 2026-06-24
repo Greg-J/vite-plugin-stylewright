@@ -478,6 +478,10 @@ export class Panel {
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
 			this.setState({ rules, focus: null, color: null, menu: null, editBp: null, status: { kind: 'ok', text: okText } });
+			// A structural op just renumbered this file's rule ids, so every earlier
+			// undo snapshot now carries stale ids that an id-keyed /apply save would
+			// misapply. Rebase history onto the fresh, on-disk state. (See History.reset.)
+			this.history.reset({ file: this.state.file, meta: this.state.meta, rules: this.state.rules });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Reload failed: ' + String(err) } });
 		}

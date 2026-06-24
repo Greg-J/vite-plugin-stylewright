@@ -61,6 +61,31 @@ describe('History: global timeline across files', () => {
 	});
 });
 
+describe('History: reset after a structural change (COR-2)', () => {
+	it('drops the timeline so stale-id snapshots can no longer be replayed', () => {
+		const h = new History<string>();
+		h.record(st('A', 'red'), 0);   // load A
+		h.record(st('A', 'blue'), 100); // edit A
+		expect(h.canUndo()).toBe(true);
+		// a structural op renumbered A's rule ids — every earlier snapshot is now unsafe
+		h.reset(st('A', 'green'));
+		expect(h.canUndo()).toBe(false);
+		expect(h.undo()).toBe(null); // cannot reach the pre-reset (stale-id) state
+	});
+
+	it('keeps tracking edits made after the reset', () => {
+		const h = new History<string>();
+		h.record(st('A', 'red'), 0);
+		h.record(st('A', 'blue'), 100);
+		h.reset(st('A', 'green'));
+		h.record(st('A', 'green'), 200); // identical to the new baseline → ignored
+		h.record(st('A', 'orange'), 700); // a fresh edit → a new step
+		expect(h.canUndo()).toBe(true);
+		expect(val(h.undo())).toBe('green'); // back to the post-reset baseline, not 'blue'/'red'
+		expect(h.canUndo()).toBe(false);
+	});
+});
+
 describe('History: coalescing + branch truncation', () => {
 	it('collapses rapid edits, keeps distinct ones', () => {
 		const h = new History<string>();

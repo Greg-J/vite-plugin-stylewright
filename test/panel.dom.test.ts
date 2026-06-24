@@ -539,3 +539,30 @@ describe('Panel: DOM tree pane', () => {
 		expect(hl!.tag).toContain('section'); // tagLabel of the hovered element
 	});
 });
+
+describe('Panel: structural ops rebase undo history (COR-2)', () => {
+	type Internals = {
+		history: { canUndo(): boolean };
+		removeRule(ri: number): Promise<void>;
+		updateDecl(ri: number, di: number, field: 'p' | 'v', val: string): void;
+	};
+	it('removing a rule makes the now-stale-id edits non-undoable', async () => {
+		const RULES_IDS: SwRule[] = [
+			{ id: 0, selector: '.a', decls: [{ prop: 'color', value: 'red' }] },
+			{ id: 1, selector: '.b', decls: [{ prop: 'color', value: 'blue' }] }
+		];
+		const ctx = makePanel(RULES_IDS);
+		await ctx.panel.pick('Button.svelte', META);
+		await tick();
+		const p = ctx.panel as unknown as Internals;
+		// a normal edit → an undoable step exists
+		p.updateDecl(0, 0, 'v', 'green');
+		await tick();
+		expect(p.history.canUndo()).toBe(true);
+		// remove a rule: the server renumbers ids, so replaying the pre-remove snapshot
+		// by id would corrupt the wrong rule. History must rebase → nothing to undo into.
+		await p.removeRule(0);
+		await tick();
+		expect(p.history.canUndo()).toBe(false);
+	});
+});
