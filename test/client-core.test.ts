@@ -68,6 +68,14 @@ describe('color: recognition + equality', () => {
 		expect(isColorValue('solid')).toBe(false);
 	});
 
+	it('rejects invalid hex lengths (COR-6: only 3/4/6/8 digits are colors)', () => {
+		expect(isColorValue('#abcd')).toBe(true);      // 4 (with alpha) ok
+		expect(isColorValue('#aabbccdd')).toBe(true);  // 8 ok
+		expect(isColorValue('#12345')).toBe(false);    // 5 is not a CSS hex color
+		expect(isColorValue('#1234567')).toBe(false);  // 7 is not either
+		expect(isColorValue('#12')).toBe(false);       // 2 too short
+	});
+
 	it('normalizes case + shorthand for equality', () => {
 		expect(normColor('#FFF')).toBe('#ffffff');
 		expect(sameColor('#fff', '#ffffff')).toBe(true);

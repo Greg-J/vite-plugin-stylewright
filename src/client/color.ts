@@ -46,7 +46,9 @@ export function hexToHsv(hex: string): { h: number; s: number; v: number } {
 }
 
 export function isColorValue(v: string): boolean {
-	return /^#([0-9a-f]{3,8})$/i.test(v) || /^(rgba?|hsla?)\(/i.test(v) || !!NAMED[v];
+	// Only 3/4/6/8 hex digits are valid CSS colors; {3,8} also matched 5 and 7,
+	// which then sliced into a garbage color in the picker (COR-6).
+	return /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v) || /^(rgba?|hsla?)\(/i.test(v) || !!NAMED[v];
 }
 
 export function parseColor(str: string): Hsva {
