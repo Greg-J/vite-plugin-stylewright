@@ -284,6 +284,19 @@ export function readStyle(source: string): { hasStyle: boolean; css: string } {
 }
 
 /**
+ * Detect a markup breakout in CSS bound for a raw write into a `<style>` block.
+ * `<style>` is an HTML *raw-text* element, so its content ends at the first literal
+ * `</style` the tokenizer sees — a `content`/`url()`/comment value carrying
+ * `</style><img src=x onerror=…>` would close the block early and inject markup that
+ * runs in the dev origin. We only need this on the verbatim path (applyStyleBlock):
+ * applyEdit/applyRules re-serialize through postcss, which escapes `<` to `\3c`.
+ * Matches `</style`/`</script` case-insensitively; legitimate CSS never contains them.
+ */
+export function hasStyleBreakout(css: string): boolean {
+	return /<\/(?:style|script)/i.test(css);
+}
+
+/**
  * Is this CSS safe to write to a .svelte file? It must parse, and every
  * declaration must have a non-empty value. This is the guard against persisting a
  * mid-typing fragment (`font`, `color:`) that would break Svelte's compiler.
@@ -311,11 +324,15 @@ export function isCompleteCss(css: string): boolean {
 export function applyStyleBlock(
 	source: string,
 	css: string
-): { code: string; changed: boolean; invalid: boolean; droppedAtRules?: boolean } {
+): { code: string; changed: boolean; invalid: boolean; droppedAtRules?: boolean; unsafe?: boolean } {
 	const block = findStyleBlock(source);
 	if (!block) return { code: source, changed: false, invalid: false };
 	if (css === block.css) return { code: source, changed: false, invalid: false };
 	if (!isCompleteCss(css)) return { code: source, changed: false, invalid: true };
+	// This path writes `css` verbatim (no postcss re-serialize), so a literal
+	// `</style>` smuggled in a string/comment would break out of the <style> block
+	// into markup. Refuse it — never persist a breakout to source.
+	if (hasStyleBreakout(css)) return { code: source, changed: false, invalid: false, unsafe: true };
 
 	// Guard against the flat whole-block serializer destroying structure. The
 	// editor's in-memory model is a flat list of rules with no at-rule context, so
