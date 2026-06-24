@@ -399,3 +399,87 @@ describe('isCompleteCss', () => {
 		expect(isCompleteCss('.a { color: ; }')).toBe(false);
 	});
 });
+
+describe('findStyleBlock — ignores <style> in script/comments (TEST-4)', () => {
+	it('skips a <style> literal inside a <script> string', () => {
+		const src = `<script>\n  const tpl = "<style>.fake{color:red}</style>";\n</script>\n<style>\n  .real { color: blue; }\n</style>\n`;
+		const b = findStyleBlock(src)!;
+		expect(b.css).toContain('.real');
+		expect(b.css).not.toContain('.fake');
+		expect(src.slice(b.start, b.end)).toBe(b.css); // offsets stay exact
+	});
+
+	it('skips a commented-out <style>', () => {
+		const src = `<!-- <style>.fake{}</style> -->\n<style>\n  .real { color: blue; }\n</style>\n`;
+		const b = findStyleBlock(src)!;
+		expect(b.css).toContain('.real');
+		expect(b.css).not.toContain('.fake');
+	});
+
+	it('keeps offsets exact when the script tag has attributes', () => {
+		const src = `<script lang="ts">\n  let x: string = "<style>nope</style>";\n</script>\n<style>\n  .a { color: red; }\n</style>\n`;
+		const b = findStyleBlock(src)!;
+		expect(src.slice(b.start, b.end)).toBe(b.css);
+		expect(b.css).toContain('.a');
+		expect(b.css).not.toContain('nope');
+	});
+});
+
+describe('applyRules — preserves in-rule comments on the slow path (COR-3)', () => {
+	const WITH_COMMENT = `<div class="a"></div>\n<style>\n\t.a {\n\t\tcolor: red;\n\t\t/* brand */\n\t\tpadding: 8px;\n\t}\n</style>\n`;
+
+	it('keeps an inline comment when a declaration is added', () => {
+		const { rules } = readRules(WITH_COMMENT);
+		const a = rules.find((r) => r.selector === '.a')!;
+		const res = applyRules(WITH_COMMENT, [{ id: a.id, selector: '.a', decls: [...a.decls, { prop: 'margin', value: '4px' }] }]);
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('/* brand */'); // would be eaten by removeAll() before the fix
+		expect(res.code).toContain('color: red');
+		expect(res.code).toContain('padding: 8px');
+		expect(res.code).toContain('margin: 4px');
+	});
+
+	it('keeps an inline comment when a declaration is removed', () => {
+		const { rules } = readRules(WITH_COMMENT);
+		const a = rules.find((r) => r.selector === '.a')!;
+		const res = applyRules(WITH_COMMENT, [{ id: a.id, selector: '.a', decls: a.decls.filter((d) => d.prop !== 'padding') }]);
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('/* brand */');
+		expect(res.code).not.toContain('padding: 8px');
+		expect(res.code).toContain('color: red');
+	});
+});
+
+describe('applyRules — at-rule edge cases (COR-5, TEST-5)', () => {
+	it('renames the OUTER @media of a nested chain (COR-5)', () => {
+		const NESTED = `<div class="x"></div>\n<style>\n\t@media (min-width: 768px) {\n\t\t@media (orientation: landscape) {\n\t\t\t.x { color: red; }\n\t\t}\n\t}\n</style>\n`;
+		const { rules } = readRules(NESTED);
+		const x = rules.find((r) => r.selector === '.x')!;
+		const res = applyRules(NESTED, [{ id: x.id, selector: '.x', decls: x.decls }], { mediaRenames: [{ id: x.id!, params: '(min-width: 1024px)' }] });
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('(min-width: 1024px)');     // outer renamed
+		expect(res.code).toContain('(orientation: landscape)'); // inner untouched
+		expect(res.code).not.toContain('(min-width: 768px)');
+	});
+
+	it('prunes a nested @supports>@media wrapper when its last rule is removed (TEST-5)', () => {
+		const NESTED = `<div class="x"></div>\n<style>\n\t@supports (display: grid) {\n\t\t@media (min-width: 768px) {\n\t\t\t.x { color: red; }\n\t\t}\n\t}\n</style>\n`;
+		const { rules } = readRules(NESTED);
+		const x = rules.find((r) => r.selector === '.x')!;
+		const res = applyRules(NESTED, [], { removeIds: [x.id!] });
+		expect(res.changed).toBe(true);
+		expect(res.code).not.toContain('@media');    // inner pruned
+		expect(res.code).not.toContain('@supports'); // outer pruned too (was left empty before)
+	});
+
+	it('preserves a @font-face when another rule is edited (TEST-5)', () => {
+		const FF = `<div class="a"></div>\n<style>\n\t@font-face { font-family: "X"; src: url(x.woff2); }\n\t.a { color: red; }\n</style>\n`;
+		const { rules } = readRules(FF);
+		const a = rules.find((r) => r.selector === '.a')!;
+		const res = applyRules(FF, [{ id: a.id, selector: '.a', decls: [{ prop: 'color', value: 'blue' }] }]);
+		expect(res.changed).toBe(true);
+		expect(res.code).toContain('@font-face');
+		expect(res.code).toContain('src: url(x.woff2)');
+		expect(res.code).toContain('color: blue');
+	});
+});

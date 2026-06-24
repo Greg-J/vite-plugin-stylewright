@@ -169,25 +169,33 @@ export function applyRules(source: string, rules: SwRule[], opts: ApplyRulesOpts
 	const removeSet = new Set(opts.removeIds || []);
 
 	// 1) media renames — change the enclosing @media params (moves the whole block).
+	// The client edits the OUTERMOST @media in the chain (its media[0] = the breakpoint
+	// chip), so rename that one — not node.parent, which is the INNERMOST at-rule and
+	// would corrupt a nested chain like @media(width){ @media(orientation){…} } (COR-5).
 	for (const ren of opts.mediaRenames || []) {
 		const node = idMap.get(ren.id);
-		const at = node?.parent;
-		if (at && at.type === 'atrule' && (at as postcss.AtRule).name.toLowerCase() === 'media') {
+		let outer: postcss.AtRule | null = null;
+		for (let p = node?.parent; p && p.type === 'atrule'; p = (p as postcss.AtRule).parent) {
+			if ((p as postcss.AtRule).name.toLowerCase() === 'media') outer = p as postcss.AtRule;
+		}
+		if (outer) {
 			const next = String(ren.params).trim();
-			if ((at as postcss.AtRule).params.trim() !== next) { (at as postcss.AtRule).params = next; renamed++; changed = true; }
+			if (outer.params.trim() !== next) { outer.params = next; renamed++; changed = true; }
 		}
 	}
 
-	// 2) removes — delete the rule, prune an emptied @media wrapper.
+	// 2) removes — delete the rule, then prune emptied at-rule wrappers, walking OUTWARD
+	// so a nested chain (e.g. @supports{ @media{ .x } }) doesn't leave an empty @supports.
 	for (const id of removeSet) {
 		const node = idMap.get(id);
 		if (!node) continue;
-		const at = node.parent;
+		let at = node.parent;
 		node.remove();
 		removed++; changed = true;
-		if (at && at.type === 'atrule') {
+		while (at && at.type === 'atrule') {
 			const atr = at as postcss.AtRule;
-			if (!atr.nodes || atr.nodes.length === 0) atr.remove();
+			const parent = atr.parent;
+			if (!atr.nodes || atr.nodes.length === 0) { atr.remove(); at = parent; } else break;
 		}
 	}
 
@@ -271,9 +279,31 @@ function reconcileDecls(node: postcss.Rule, desired: { prop: string; value: stri
 		return changed;
 	}
 
-	node.removeAll();
-	for (const d of want) node.append({ prop: d.prop, value: d.value });
-	return true;
+	// Slow path — a declaration was added or removed. Reconcile IN PLACE rather than
+	// node.removeAll(), which also deletes comment nodes inside the rule (COR-3 data
+	// loss). Reuse existing decl nodes (matched by prop, so their formatting survives),
+	// insert new ones after the previous decl, and drop the leftovers — comments are
+	// never touched. A pure reorder of the same props is left as-is (not reachable from
+	// the editor UI), so the output stays byte-identical in that case.
+	const pool = new Map<string, postcss.Declaration[]>();
+	for (const c of current) { const a = pool.get(c.prop); if (a) a.push(c); else pool.set(c.prop, [c]); }
+
+	let changed = false;
+	let anchor: postcss.Declaration | null = null;
+	for (const d of want) {
+		const reuse = pool.get(d.prop)?.shift();
+		if (reuse) {
+			if (reuse.value !== d.value) { reuse.value = d.value; changed = true; }
+			anchor = reuse;
+		} else {
+			const created = postcss.decl({ prop: d.prop, value: d.value });
+			if (anchor) node.insertAfter(anchor, created); else node.prepend(created);
+			changed = true;
+			anchor = created;
+		}
+	}
+	for (const arr of pool.values()) for (const leftover of arr) { leftover.remove(); changed = true; }
+	return changed;
 }
 
 /** Read the raw inner CSS of a component's <style> block (the code-editor model). */
