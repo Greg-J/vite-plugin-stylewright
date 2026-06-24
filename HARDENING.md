@@ -4,6 +4,8 @@
 >
 > Severities: P0 = must fix before release (exploitable / data-loss). P1 = serious. P2 = should-fix. P3 = minor.
 > Workflow: fix highest-severity `TODO` items first; flip Status to `DONE` (or `WONTFIX` + reason) as you go.
+>
+> **Progress (2026-06-24):** the 4 criticals are DONE on branch `hardening` (SEC-1, SEC-2, COR-1, COR-2; test count 112→122, full green gate passing). Everything else below is still `TODO`. One follow-up was added beyond the original audit: **COR-7** (restore undo across structural ops — optional).
 
 ## Summary
 
@@ -59,6 +61,11 @@
 - **Where:** `src/client/color.ts:49`
 - **Why it matters:** `/^#([0-9a-f]{3,8})$/i` matches hex of length 3–8 inclusive, but only 3/4/6/8 are valid CSS hex colors. A value like `#12345` or `#1234567` is classified as a color, opening the picker and routing through `parseColor`, which slices it blindly and yields a garbage color rather than treating it as plain text. Impact is minor: it only triggers on a hex literal that is already invalid CSS (a typo in the developer's own source); no crash, no data loss.
 - **Fix:** Restrict to exact lengths, e.g. `/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i`.
+
+### [COR-7] (P3, enhancement — follow-up to COR-2, not from the original audit) Restore undo across structural ops — Status: TODO
+- **Where:** `src/client/panel.ts:527-531` (`applyHistState`); `src/client/history.ts`; `src/server/patch.ts` (`applyRules` id-keyed patch)
+- **Why it matters:** COR-2 fixed the corruption by *dropping* undo history whenever a structural op (add/remove override, rename breakpoint) renumbers rule ids (`History.reset` in `reloadRules`). That's sound but loses the ability to undo across those ops — a real UX regression for a global, cross-file timeline. This item restores it without reintroducing the stale-id corruption. **Do this only if the UX matters; otherwise mark WONTFIX (the COR-2 behavior is acceptable).**
+- **Fix:** Stop replaying restored snapshots by fragile walk-order ordinals. In `applyHistState`, after restoring the in-memory view, re-fetch the target file's current rules and build the save by *stable identity* (selector + enclosing `@media` signature) rather than id: snapshot rules with a current match → carry the current id (patch); snapshot rules with no match → no id (create); current rules absent from the snapshot → `removeIds`. Then the existing `History.reset` call in `reloadRules` can be removed (history survives structural ops again). Add tests: (a) remove a rule, undo → the removed rule is recreated and no *other* rule's declarations change; (b) add an override, undo → the created rule is removed; (c) the cross-file global-undo tests still pass. Handle duplicate (selector+media) pairs by matching positionally within the group (never cross-selector).
 
 ## Performance
 
@@ -142,3 +149,12 @@
 - `Containment guard does not resolve symlinks — no realpath test, latent escape` (testgaps) — duplicate of the security symlink finding; misclassified as a test gap (the proposed test can't pass without first adding the check), endpoints return only `<style>`-block CSS (no raw bytes / SSH keys), and there's no remote vector to plant the symlink. P3 hardening at most.
 - `Panel save/load FAILURE paths are untested — risk of silent edit loss` (testgaps) — the "silent edit loss" premise is impossible: every failure branch patches only `status` and `setState` merges, so `state.rules` is never reverted/cleared. Remaining is a minor coverage nicety (P3); `saveCss` is wired, not dead.
 - `applyStyleBlock at-rule guard signature edge cases untested` (testgaps) — neither impact is reachable via the real save flow (panel uses the structure-preserving `/apply`; the only `/style` producer emits no at-rules); claim (b)'s outcome is a safe refusal, and the proposed normalize-params fix would weaken an intentionally conservative temporary guard.
+
+## Release checklist (human — not loop-able)
+
+These are the manual gates around the automated fix loop:
+
+- [ ] **Review the security diff by hand:** `git diff main..hardening -- src/server` — re-read the SEC-1/SEC-2 changes even though tests pass.
+- [ ] **Merge** `hardening` → `main` once the backlog above is DONE/WONTFIX and reviewed.
+- [ ] **Smoke-test in a real app:** run `vite dev` with the plugin, pick an element, edit/save a rule, confirm HMR repaints and source is written correctly; try an `hsl(240,…)` value (COR-1) and a remove-then-undo (COR-2).
+- [ ] **Pre-publish:** bump `version` from `0.0.1`, verify `npm pack` contents, then publish. (PRAC-1/PRAC-2 in the backlog cover the packaging metadata to fix first.)
