@@ -75,3 +75,39 @@ describe('createStylewrightMiddleware — CSRF / SEC-1', () => {
 		expect(onDisk()).toContain('color: tomato');
 	});
 });
+
+const ok = (): Record<string, string> => ({ 'content-type': 'application/json', origin: base });
+
+describe('createStylewrightMiddleware — /edit input validation (TEST-1)', () => {
+	it('rejects a missing/non-string value (no `prop: undefined` write)', async () => {
+		const res = await post('/__stylewright/edit', ok(), JSON.stringify({ file: COMP, selector: '.btn', prop: 'color' }));
+		expect(res.status).toBe(400);
+		expect(onDisk()).toBe(SRC);
+		expect(onDisk()).not.toContain('undefined');
+	});
+
+	it('rejects a value carrying { } ; (extra-rule injection)', async () => {
+		const res = await post('/__stylewright/edit', ok(), JSON.stringify({ file: COMP, selector: '.btn', prop: 'color', value: 'red } .evil{color:blue' }));
+		expect(res.status).toBe(400);
+		expect(onDisk()).toBe(SRC);
+		expect(onDisk()).not.toContain('.evil');
+	});
+});
+
+describe('createStylewrightMiddleware — readBody (COR-4, TEST-6)', () => {
+	it('preserves multi-byte UTF-8 in a large body (no mojibake on chunk boundaries)', async () => {
+		const big = '😀中café'.repeat(12000); // ~140 KB → chunked by Node
+		const res = await post('/__stylewright/style', ok(), JSON.stringify({ file: COMP, css: `\n  .btn { content: "${big}"; }\n` }));
+		expect(res.status).toBe(200);
+		const disk = onDisk();
+		expect(disk).toContain('😀中café'); // intact
+		expect(disk).not.toContain('�'); // no replacement chars
+	});
+
+	it('rejects a body over the 1 MB byte cap and does not write', async () => {
+		const huge = JSON.stringify({ file: COMP, selector: '.btn', prop: 'color', value: 'x'.repeat(1_100_000) });
+		const res = await post('/__stylewright/edit', ok(), huge);
+		expect(res.status).toBe(400);
+		expect(onDisk()).toBe(SRC);
+	});
+});
