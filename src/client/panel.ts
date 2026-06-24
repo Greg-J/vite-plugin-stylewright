@@ -108,6 +108,27 @@ const pth = (d: string, opts?: ElProps): SvgEl => el('path', { d, ...(opts || {}
 const toRect = (r: DOMRect): Rect => ({ top: r.top, left: r.left, width: r.width, height: r.height });
 /** Collapse insignificant whitespace so two source selectors compare equal. */
 const normSel = (s: string): string => s.replace(/\s+/g, ' ').trim();
+/** Re-point a restored undo/redo snapshot onto the CURRENT source rules by stable
+ *  identity (selector + @media signature) instead of fragile walk-order ids — so an
+ *  undo across a structural change patches/creates/removes the right rules rather than
+ *  corrupting an unrelated one (COR-7, superseding COR-2's history-reset). A snapshot
+ *  rule that matches a current rule carries its id (→ patch); an unmatched snapshot rule
+ *  gets no id (→ create); a current rule absent from the snapshot goes in removeIds.
+ *  Duplicate (selector+@media) rules are matched positionally within their group. */
+export function rekeyToCurrent(snapshot: Rule[], current: Rule[]): { rules: Rule[]; removeIds: number[] } {
+	const sig = (r: Rule): string => normSel(r.sel) + '' + (r.media || []).map((m) => m.name + ' ' + String(m.params).trim()).join('');
+	const pool = new Map<string, Rule[]>();
+	for (const c of current) { const k = sig(c); const a = pool.get(k); if (a) a.push(c); else pool.set(k, [c]); }
+	const matched = new Set<Rule>();
+	const rules: Rule[] = snapshot.map((s) => {
+		const c = pool.get(sig(s))?.shift();
+		if (c) { matched.add(c); return { ...s, id: c.id }; }
+		return { ...s, id: undefined };
+	});
+	const removeIds: number[] = [];
+	for (const c of current) if (!matched.has(c) && typeof c.id === 'number') removeIds.push(c.id);
+	return { rules, removeIds };
+}
 /** Pull min-width / max-width pixel bounds from a media query's params. Returns null
  *  for a non-width query (orientation, etc.) so the caller falls back to matchMedia. */
 function parseWidthQuery(params: string): { min?: number; max?: number } | null {
@@ -494,10 +515,6 @@ export class Panel {
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
 			this.setState({ rules, focus: null, color: null, menu: null, editBp: null, status: { kind: 'ok', text: okText } });
-			// A structural op just renumbered this file's rule ids, so every earlier
-			// undo snapshot now carries stale ids that an id-keyed /apply save would
-			// misapply. Rebase history onto the fresh, on-disk state. (See History.reset.)
-			this.history.reset({ file: this.state.file, meta: this.state.meta, rules: this.state.rules });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Reload failed: ' + String(err) } });
 		}
@@ -545,10 +562,28 @@ export class Panel {
 
 	// ---------- global undo / redo (one timeline across every file) ----------
 	private applyHistState(s: HistState<PickMeta | null>, label: string): void {
-		// The restored state may belong to a different file — switch the view to it
-		// and write it back to that file's source.
-		this.setState({ file: s.file, meta: s.meta, rules: s.rules, view: s.file ? 'editing' : this.state.view, color: null, menu: null, focus: null, status: { kind: 'idle', text: label } });
-		this.save();
+		// The restored state may belong to a different file — switch the view to it.
+		// The snapshot's source ids may be stale (a structural op since then renumbered
+		// them), so DON'T write it back by id; re-key against the live source first.
+		this.setState({ file: s.file, meta: s.meta, rules: s.rules, view: s.file ? 'editing' : this.state.view, color: null, menu: null, focus: null, status: { kind: 'saving', text: label } });
+		if (s.file) void this.saveRestored(s.file, s.rules, label);
+	}
+	/** Persist a restored undo/redo snapshot by re-keying it onto the file's CURRENT
+	 *  source (selector + @media identity), so an undo across a structural change
+	 *  recreates/removes/patches the right rules instead of corrupting one by stale id
+	 *  (COR-7). Replaces the old blind, id-keyed save() on the restore path. */
+	private async saveRestored(file: string, snapshot: Rule[], label: string): Promise<void> {
+		try {
+			const resp = await this.host.loadRules(file);
+			const current = resp.hasStyle && !resp.error ? fromServerRules(resp.rules) : [];
+			const { rules, removeIds } = rekeyToCurrent(snapshot, current);
+			const d = await this.host.applyRules(file, toServerRules(rules), removeIds.length ? { removeIds } : undefined);
+			if (!d.ok) { this.setState({ status: { kind: 'err', text: d.error || 'Undo save failed' } }); return; }
+			// creates/removes shift ids → re-fetch so the editor model + future saves align.
+			await this.reloadRules(label);
+		} catch (err) {
+			this.setState({ status: { kind: 'err', text: 'Undo failed: ' + String(err) } });
+		}
 	}
 	private undo(): void {
 		const s = this.history.undo();
