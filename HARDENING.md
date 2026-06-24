@@ -91,12 +91,12 @@
 
 ## Best practices / packaging
 
-### [PRAC-1] (P2) package.json missing repository / bugs / homepage metadata — Status: TODO
+### [PRAC-1] (P2) package.json missing repository / bugs / homepage metadata — Status: DONE
 - **Where:** `package.json:1-16`
 - **Why it matters:** This is a 0.0.1 staged for first npm publish (`prepublishOnly` build, `files` allowlist), and the README advertises the GitHub repo, but `package.json` has no `repository`, `bugs`, or `homepage` field. The npm page will have no source link, `npm repo`/`npm bugs` won't work, and issue routing/provenance is lost — standard release hygiene for a public tool soliciting issues/PRs. (Purely metadata; zero functional/security impact; sits at the P2/P3 boundary.)
 - **Fix:** Add `"repository": { "type": "git", "url": "git+https://github.com/Greg-J/vite-plugin-stylewright.git" }`, `"bugs": { "url": ".../issues" }`, and `"homepage"`.
 
-### [PRAC-2] (P3; auditor said P2, verifier downgraded) exports map types not split per-condition; orphaned dist/index.d.cts — Status: TODO
+### [PRAC-2] (P3; auditor said P2, verifier downgraded) exports map types not split per-condition; orphaned dist/index.d.cts — Status: DONE
 - **Where:** `package.json:17-23`
 - **Why it matters:** The package is `"type":"module"` so `dist/index.d.ts` is treated as ESM types, but the exports map exposes a CJS `"require":"./dist/index.cjs"` with only a single top-level `"types":"./dist/index.d.ts"`. Under `moduleResolution` node16/nodenext a `require()` consumer resolves ESM-flavored types for a CJS module (the FalseESM hazard `attw` flags); tsup already emits `dist/index.d.cts` for this case but nothing references it. Downgraded to P3: it's a Vite plugin consumed almost exclusively via `import` under `moduleResolution:"bundler"` (which doesn't differentiate the conditions and `attw` doesn't flag), the `.d.cts` is byte-identical and `dist/index.cjs` already emits `__esModule`+`default`, so the worst case is a benign `attw` warning for an uncommon CJS/node16 consumer.
 - **Fix:** Nest types per condition — `".": { "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }, "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" } }`; validate with `npx @arethetypeswrong/cli`.
