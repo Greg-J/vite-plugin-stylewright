@@ -52,15 +52,27 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.end(text);
 }
 
+const MAX_BODY_BYTES = 1_000_000;
+
 function readBody(req: Connect.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
-		let data = '';
+		// Collect raw Buffers and decode ONCE at the end. Concatenating each chunk as a
+		// string (`data += chunk`) decodes per-chunk, so a multi-byte UTF-8 character
+		// split across a chunk boundary becomes U+FFFD — silent mojibake written to the
+		// developer's source (COR-4). The cap is measured in bytes, not UTF-16 code
+		// units, so it's a real size limit (TEST-6).
+		const chunks: Buffer[] = [];
+		let size = 0;
+		let done = false;
 		req.on('data', (chunk) => {
-			data += chunk;
-			if (data.length > 1_000_000) reject(new Error('body too large'));
+			if (done) return;
+			const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			size += buf.length;
+			if (size > MAX_BODY_BYTES) { done = true; reject(new Error('body too large')); return; }
+			chunks.push(buf);
 		});
-		req.on('end', () => resolve(data));
-		req.on('error', reject);
+		req.on('end', () => { if (!done) { done = true; resolve(Buffer.concat(chunks).toString('utf8')); } });
+		req.on('error', (err) => { if (!done) { done = true; reject(err); } });
 	});
 }
 
@@ -311,7 +323,10 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 				return sendJson(res, 400, { ok: false, changed: false, matched: false, error: 'invalid json' });
 			}
 			const abs = resolveSvelteFile(root, edit?.file);
-			if (!abs || !edit.selector || !edit.prop) {
+			// value must be a real string (an undefined value used to serialize
+			// `prop: undefined` and break the compile) and must not carry `{ } ;`, which
+			// would close the rule and inject extra rules into source (TEST-1).
+			if (!abs || !edit.selector || !edit.prop || typeof edit.value !== 'string' || /[{};]/.test(edit.value)) {
 				return sendJson(res, 400, { ok: false, changed: false, matched: false, error: 'bad request' });
 			}
 			try {
