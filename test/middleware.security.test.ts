@@ -9,7 +9,8 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createStylewrightMiddleware } from '../src/server/middleware.js';
+import { createStylewrightMiddleware, resolveSvelteFile } from '../src/server/middleware.js';
+import { isAbsolute, join as pjoin } from 'node:path';
 
 const COMP = 'Comp.svelte';
 const SRC = `<button class="btn">x</button>\n<style>\n  .btn { color: #333; }\n</style>\n`;
@@ -38,6 +39,17 @@ function post(path: string, headers: Record<string, string>, body: string): Prom
 		});
 		req.on('error', reject);
 		req.end(body);
+	});
+}
+function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string; ctype: string }> {
+	return new Promise((resolve, reject) => {
+		const req = http.request(`${base}${path}`, { method: 'GET', headers }, (res) => {
+			let data = '';
+			res.on('data', (c) => (data += c));
+			res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data, ctype: String(res.headers['content-type'] || '') }));
+		});
+		req.on('error', reject);
+		req.end();
 	});
 }
 const onDisk = () => readFileSync(join(root, COMP), 'utf8');
@@ -109,5 +121,55 @@ describe('createStylewrightMiddleware — readBody (COR-4, TEST-6)', () => {
 		const res = await post('/__stylewright/edit', ok(), huge);
 		expect(res.status).toBe(400);
 		expect(onDisk()).toBe(SRC);
+	});
+});
+
+describe('createStylewrightMiddleware — HTTP contract (TEST-2)', () => {
+	it('GET /rules returns 200 for an in-root file, 404 for a path escape', async () => {
+		const good = await get(`/__stylewright/rules?file=${encodeURIComponent(COMP)}`);
+		expect(good.status).toBe(200);
+		expect(JSON.parse(good.body).hasStyle).toBe(true);
+		const bad = await get(`/__stylewright/rules?file=${encodeURIComponent('../../../etc/passwd')}`);
+		expect(bad.status).toBe(404);
+	});
+
+	it('GET /client.js serves the overlay bundle as javascript', async () => {
+		const res = await get('/__stylewright/client.js');
+		expect(res.status).toBe(200);
+		expect(res.ctype).toContain('javascript');
+	});
+
+	it('rejects a malformed body shape with 400 (css not a string / rules not an array)', async () => {
+		const style = await post('/__stylewright/style', ok(), JSON.stringify({ file: COMP, css: 123 }));
+		const apply = await post('/__stylewright/apply', ok(), JSON.stringify({ file: COMP, rules: 'x' }));
+		expect(style.status).toBe(400);
+		expect(apply.status).toBe(400);
+		expect(onDisk()).toBe(SRC);
+	});
+
+	it('falls through (next) for a GET on a POST-only route', async () => {
+		const res = await get('/__stylewright/apply');
+		expect(res.status).toBe(404); // our test harness `next` sets 404
+	});
+});
+
+describe('resolveSvelteFile — adversarial paths (TEST-3)', () => {
+	it('returns an absolute path for a legit in-root .svelte file', () => {
+		const abs = resolveSvelteFile(root, COMP);
+		expect(abs).not.toBeNull();
+		expect(isAbsolute(abs!)).toBe(true);
+		expect(abs!.toLowerCase().endsWith('.svelte')).toBe(true);
+	});
+
+	it('returns null for traversal, out-of-root, prefix-sibling, wrong-ext, and missing files', () => {
+		expect(resolveSvelteFile(root, '../../../etc/passwd')).toBeNull();      // traversal
+		expect(resolveSvelteFile(root, '../../../etc/passwd.svelte')).toBeNull(); // traversal w/ ext
+		expect(resolveSvelteFile(root, isAbsolute('/etc/x.svelte') ? '/etc/x.svelte' : 'C:/Windows/x.svelte')).toBeNull(); // absolute outside
+		expect(resolveSvelteFile(root, '../' + root.split(/[\\/]/).pop() + 'EVIL/x.svelte')).toBeNull(); // prefix sibling
+		expect(resolveSvelteFile(root, 'styles.css')).toBeNull();              // not .svelte
+		writeFileSync(pjoin(root, 'styles.css'), 'x', 'utf8');
+		expect(resolveSvelteFile(root, 'styles.css')).toBeNull();              // exists but not .svelte
+		expect(resolveSvelteFile(root, 'Nope.svelte')).toBeNull();            // .svelte but missing
+		expect(resolveSvelteFile(root, '')).toBeNull();                       // empty
 	});
 });
