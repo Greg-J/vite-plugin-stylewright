@@ -168,6 +168,22 @@ describe('applyStyleBlock', () => {
 		expect(res.changed).toBe(false);
 		expect(res.code).toBe(SAMPLE);
 	});
+
+	// SEC-2: this path writes css verbatim, so a literal </style> in a string/comment
+	// would close the <style> block early and inject markup that runs in the dev origin.
+	it('refuses a </style> breakout payload and never writes it (flags unsafe)', () => {
+		for (const payload of [
+			'\n  .btn { content: "</style><img src=x onerror=alert(1)>"; }\n',
+			'\n  .btn { color: red; } /* </style><script>alert(1)</script> */\n',
+			'\n  .btn { background: url("</STYLE>"); }\n'
+		]) {
+			const res = applyStyleBlock(SAMPLE, payload);
+			expect(res.unsafe).toBe(true);
+			expect(res.changed).toBe(false);
+			expect(res.code).toBe(SAMPLE); // source byte-for-byte unchanged
+			expect(res.code).not.toContain('</style><'); // the breakout never reached disk
+		}
+	});
 });
 
 // Regression guard for the real bug: the editor's flat whole-block model can't

@@ -65,6 +65,33 @@ function readBody(req: Connect.IncomingMessage): Promise<string> {
 }
 
 /**
+ * Same-origin guard for state-changing requests. The POST endpoints write to the
+ * developer's .svelte source, so without this ANY website visited while `vite dev`
+ * runs could silently overwrite/inject into source via a cross-site POST (CSRF) —
+ * the write lands even though the attacker can't read the opaque response. We allow
+ * the request only when:
+ *   - the Origin (or Referer fallback) host matches the dev server's own Host, AND
+ *   - the body is application/json — which the real overlay always sends and which
+ *     forces any cross-origin attempt into a CORS preflight the browser blocks.
+ * The browser sets Origin/Referer and a page cannot forge them, so a mismatch — or
+ * their absence, which a genuine same-origin fetch POST never has — is refused.
+ * GET reads stay open: cross-origin JS still can't read their responses (no CORS).
+ */
+function isCrossSiteWrite(req: Connect.IncomingMessage): boolean {
+	const ct = String(req.headers['content-type'] || '').toLowerCase();
+	if (!ct.includes('application/json')) return true;
+	const host = req.headers.host ? String(req.headers.host) : '';
+	if (!host) return true;
+	const src = req.headers.origin || req.headers.referer;
+	if (!src) return true;
+	try {
+		return new URL(String(src)).host !== host;
+	} catch {
+		return true;
+	}
+}
+
+/**
  * Load the prebuilt overlay bundle that sits next to this file. Read fresh on
  * every request (NOT cached) so a rebuilt overlay shows up on a plain browser
  * refresh — no dev-server restart needed while iterating. The read is a single
@@ -176,6 +203,12 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 		const url = req.url || '';
 		if (!url.startsWith(PREFIX)) return next();
 
+		// CSRF guard: every POST under the prefix writes to source, so reject any that
+		// isn't a same-origin JSON request from the dev page itself. (See isCrossSiteWrite.)
+		if (req.method === 'POST' && isCrossSiteWrite(req)) {
+			return sendJson(res, 403, { ok: false, changed: false, error: 'cross-site request blocked' });
+		}
+
 		// --- serve the overlay bundle ---
 		if (req.method === 'GET' && url.startsWith(`${PREFIX}/client.js`)) {
 			res.statusCode = 200;
@@ -241,7 +274,7 @@ export function createStylewrightMiddleware(root: string): Connect.NextHandleFun
 				const source = await readFile(abs, 'utf8');
 				const result = applyStyleBlock(source, save.css);
 				if (result.changed) await writeFile(abs, result.code, 'utf8');
-				return sendJson(res, 200, { ok: true, changed: result.changed, invalid: result.invalid, droppedAtRules: result.droppedAtRules });
+				return sendJson(res, 200, { ok: true, changed: result.changed, invalid: result.invalid, droppedAtRules: result.droppedAtRules, unsafe: result.unsafe });
 			} catch (err) {
 				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
 			}
