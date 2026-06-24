@@ -29,7 +29,7 @@ const PREFIX = '/__stylewright';
  * the project root. Returns null for anything that escapes the root, isn't a
  * .svelte file, or doesn't exist — the guard against writing arbitrary files.
  */
-function resolveSvelteFile(root: string, file: string): string | null {
+export function resolveSvelteFile(root: string, file: string): string | null {
 	if (!file) return null;
 	const abs = normalize(isAbsolute(file) ? file : join(root, file));
 	const nRoot = normalize(root);
