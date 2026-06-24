@@ -40,6 +40,18 @@ describe('color: round-trips', () => {
 		expect(sameColor('hsl(0, 100%, 50%)', '#ff0000')).toBe(true); // same color, different notation
 	});
 
+	it('parses every hsl hue sextant to the right RGB (COR-1: 240–300 was mapped to red)', () => {
+		// Each pure-hue hsl() must round-trip to its primary/secondary hex. The 240–300
+		// band is the regression: pure blue hsl(240) used to parse to pure red.
+		expect(normColor('hsl(0, 100%, 50%)')).toBe('#ff0000');   // red
+		expect(normColor('hsl(60, 100%, 50%)')).toBe('#ffff00');  // yellow
+		expect(normColor('hsl(120, 100%, 50%)')).toBe('#00ff00'); // green
+		expect(normColor('hsl(180, 100%, 50%)')).toBe('#00ffff'); // cyan
+		expect(normColor('hsl(240, 100%, 50%)')).toBe('#0000ff'); // blue  ← was #ff0000
+		expect(normColor('hsl(270, 100%, 50%)')).toBe('#8000ff'); // violet ← was #ff0080
+		expect(normColor('hsl(300, 100%, 50%)')).toBe('#ff00ff'); // magenta
+	});
+
 	it('hsvToRgb / rgbToHex agree on primaries', () => {
 		expect(rgbToHex(...hsvToRgb(0, 1, 1))).toBe('#ff0000');
 		expect(rgbToHex(...hsvToRgb(120, 1, 1))).toBe('#00ff00');

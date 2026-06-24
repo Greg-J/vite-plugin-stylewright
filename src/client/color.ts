@@ -75,7 +75,7 @@ export function parseColor(str: string): Hsva {
 				else if (hh < 120) { rr = x; gg = cc; }
 				else if (hh < 180) { gg = cc; bb = x; }
 				else if (hh < 240) { gg = x; bb = cc; }
-				else if (hh < 300) { rr = cc; bb = x; }
+				else if (hh < 300) { rr = x; bb = cc; }
 				else { rr = cc; bb = x; }
 				r = (rr + mm) * 255; g = (gg + mm) * 255; b = (bb + mm) * 255;
 			} else {
