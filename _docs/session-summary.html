@@ -1,0 +1,774 @@
+<title>Stylewright AI — build session summary</title>
+
+<style>
+  :root {
+    --ground: #f7f6fb;
+    --raise: #ffffff;
+    --sunk: #efedf6;
+    --line: #e0ddea;
+    --line-soft: #eae7f2;
+    --ink: #1d1b27;
+    --ink-2: #45415a;
+    --muted: #6a6772;
+    --faint: #8b8797;
+    --accent: #5a4cf0;
+    --accent-ink: #4a3ce0;
+    --accent-wash: #ece9fe;
+    --ok: #0d7a56;
+    --ok-wash: #dff3ea;
+    --warn: #8a5d00;
+    --warn-wash: #fbeed2;
+    --bad: #b3261e;
+    --bad-wash: #fbe4e2;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --shadow: 0 1px 2px rgba(29, 27, 39, .05), 0 8px 24px -16px rgba(29, 27, 39, .28);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #14131a;
+      --raise: #1c1b24;
+      --sunk: #101018;
+      --line: #2c2a38;
+      --line-soft: #24222e;
+      --ink: #ececf1;
+      --ink-2: #cbc7d8;
+      --muted: #9a97a6;
+      --faint: #6f6b7d;
+      --accent: #8b7cf6;
+      --accent-ink: #bcb0ff;
+      --accent-wash: #241f3d;
+      --ok: #34d399;
+      --ok-wash: #10291f;
+      --warn: #e8c98a;
+      --warn-wash: #2b2313;
+      --bad: #f87171;
+      --bad-wash: #2d1616;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 32px -20px rgba(0, 0, 0, .9);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #14131a; --raise: #1c1b24; --sunk: #101018;
+    --line: #2c2a38; --line-soft: #24222e;
+    --ink: #ececf1; --ink-2: #cbc7d8; --muted: #9a97a6; --faint: #6f6b7d;
+    --accent: #8b7cf6; --accent-ink: #bcb0ff; --accent-wash: #241f3d;
+    --ok: #34d399; --ok-wash: #10291f;
+    --warn: #e8c98a; --warn-wash: #2b2313;
+    --bad: #f87171; --bad-wash: #2d1616;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px -20px rgba(0,0,0,.9);
+  }
+  :root[data-theme="light"] {
+    --ground: #f7f6fb; --raise: #ffffff; --sunk: #efedf6;
+    --line: #e0ddea; --line-soft: #eae7f2;
+    --ink: #1d1b27; --ink-2: #45415a; --muted: #6a6772; --faint: #8b8797;
+    --accent: #5a4cf0; --accent-ink: #4a3ce0; --accent-wash: #ece9fe;
+    --ok: #0d7a56; --ok-wash: #dff3ea;
+    --warn: #8a5d00; --warn-wash: #fbeed2;
+    --bad: #b3261e; --bad-wash: #fbe4e2;
+    --shadow: 0 1px 2px rgba(29,27,39,.05), 0 8px 24px -16px rgba(29,27,39,.28);
+  }
+
+  * { box-sizing: border-box; }
+
+  .page {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    padding: 0 24px 96px;
+    min-height: 100vh;
+  }
+
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .wide { max-width: 940px; margin: 0 auto; }
+
+  /* ---------- masthead ---------- */
+  .masthead { padding: 64px 0 36px; border-bottom: 1px solid var(--line); }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    display: flex; align-items: center; gap: 10px;
+    margin: 0 0 20px;
+  }
+  .kicker::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  h1 {
+    font-size: clamp(30px, 5vw, 44px);
+    line-height: 1.1;
+    letter-spacing: -.022em;
+    font-weight: 640;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 18px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    margin: 0;
+    max-width: 62ch;
+  }
+
+  /* ---------- metric strip ---------- */
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 36px 0 8px;
+  }
+  .metric { background: var(--raise); padding: 16px 18px; }
+  .metric dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0 0 7px;
+  }
+  .metric dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    line-height: 1.1;
+  }
+  .metric dd .from { color: var(--faint); font-weight: 400; font-size: 17px; }
+  .metric dd .arrow { color: var(--accent); font-weight: 400; font-size: 15px; margin: 0 3px; }
+  .metric .note { display: block; font-family: var(--sans); font-size: 12px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
+
+  /* ---------- sections ---------- */
+  section { padding-top: 52px; }
+  h2 {
+    font-size: 13px;
+    font-family: var(--mono);
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--accent-ink);
+    margin: 0 0 8px;
+  }
+  .h2-sub {
+    font-size: 24px;
+    line-height: 1.25;
+    letter-spacing: -.017em;
+    font-weight: 620;
+    margin: 0 0 20px;
+    text-wrap: balance;
+  }
+  p { margin: 0 0 16px; max-width: 66ch; }
+  p:last-child { margin-bottom: 0; }
+  a { color: var(--accent-ink); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  code {
+    font-family: var(--mono);
+    font-size: .875em;
+    background: var(--sunk);
+    border: 1px solid var(--line-soft);
+    border-radius: 4px;
+    padding: .1em .38em;
+    white-space: nowrap;
+  }
+  strong { font-weight: 640; color: var(--ink); }
+
+  /* ---------- decision list ---------- */
+  .decisions { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .decision { background: var(--raise); padding: 18px 20px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .decision .q {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .decision .a { font-weight: 600; font-size: 16.5px; line-height: 1.4; color: var(--ink); }
+  .decision .why { font-size: 14.5px; color: var(--muted); line-height: 1.55; max-width: 68ch; }
+
+  /* ---------- findings ---------- */
+  .findings { display: flex; flex-direction: column; gap: 12px; }
+  .finding {
+    background: var(--raise);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .finding-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 7px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: 2.5px 7px;
+    border-radius: 4px;
+    flex: none;
+    white-space: nowrap;
+  }
+  .chip.crit { background: var(--bad-wash); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 34%, transparent); }
+  .chip.high { background: var(--warn-wash); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent); }
+  .chip.pre  { background: var(--sunk); color: var(--muted); border: 1px solid var(--line); }
+  .chip.fixed { background: var(--ok-wash); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 34%, transparent); }
+  .finding-title { font-weight: 620; font-size: 16px; line-height: 1.35; color: var(--ink); }
+  .finding p { font-size: 14.5px; color: var(--muted); margin: 0; line-height: 1.55; max-width: none; }
+  .finding p + p { margin-top: 8px; }
+  .finding .fix { color: var(--ink-2); }
+  .finding .fix b { color: var(--ok); font-weight: 620; }
+
+  /* ---------- table ---------- */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--raise); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 620px; }
+  th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    background: var(--sunk);
+    border-bottom: 1px solid var(--line);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.was { color: var(--bad); font-family: var(--mono); font-size: 13px; }
+  td.now { color: var(--ok); font-family: var(--mono); font-size: 13px; }
+  td.what { color: var(--ink); }
+
+  /* ---------- file map ---------- */
+  .files { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+  .filegroup { background: var(--raise); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .filegroup h3 {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--faint); font-weight: 600; margin: 0 0 10px;
+  }
+  .filegroup ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+  .filegroup li { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .filegroup .path { font-family: var(--mono); font-size: 12.5px; color: var(--accent-ink); word-break: break-all; }
+  .filegroup .desc { font-size: 13px; color: var(--muted); line-height: 1.45; }
+  .filegroup .new { color: var(--ok); font-family: var(--mono); font-size: 10px; letter-spacing: .06em; }
+
+  /* ---------- checks ---------- */
+  .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  .checks li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 11px; align-items: start; font-size: 15px; color: var(--ink-2); line-height: 1.5; }
+  .checks .tick { color: var(--ok); font-weight: 700; font-family: var(--mono); line-height: 1.5; }
+  .checks .sub { display: block; color: var(--muted); font-size: 13.5px; }
+
+  /* ---------- callout ---------- */
+  .callout {
+    background: var(--accent-wash);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .callout .lede { font-weight: 620; color: var(--ink); margin-bottom: 8px; font-size: 16.5px; }
+  .callout p { color: var(--ink-2); font-size: 15px; margin-bottom: 12px; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  details {
+    background: var(--raise); border: 1px solid var(--line); border-radius: 10px; padding: 0 18px;
+  }
+  summary {
+    cursor: pointer; padding: 14px 0; font-weight: 600; font-size: 15px;
+    list-style: none; display: flex; align-items: center; gap: 9px; color: var(--ink);
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "›"; font-family: var(--mono); color: var(--accent); font-size: 17px;
+    transition: transform .14s ease; display: inline-block;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details .inner { padding: 0 0 16px; }
+
+  footer {
+    margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 12px; color: var(--faint);
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  }
+  footer .dot { color: var(--line); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+  @media (max-width: 560px) {
+    .page { padding: 0 16px 64px; }
+    .masthead { padding-top: 44px; }
+  }
+</style>
+
+<div class="page">
+
+  <div class="wrap">
+    <header class="masthead">
+      <p class="kicker">vite-plugin-stylewright · build session</p>
+      <h1>The Ask&nbsp;AI path, shipped — and the CSS editor made safe on the way</h1>
+      <p class="standfirst">
+        Built the agent hand-off feature end to end, then found the spec was wrong about its own
+        geometry, its own security baseline, and the one thing it called its most important
+        correction. Two credential-grade holes turned up in the existing CSS editor as well. A third
+        agent — OpenCode — went in last, behind a vendor table, after measuring what it actually does
+        rather than trusting what was written about it.
+      </p>
+    </header>
+
+    <dl class="metrics">
+      <div class="metric">
+        <dt>Test suite</dt>
+        <dd><span class="from">112</span><span class="arrow">→</span>309</dd>
+        <span class="note">All 112 pre-existing tests still pass, untouched.</span>
+      </div>
+      <div class="metric">
+        <dt>Spec claims audited</dt>
+        <dd>27<span class="from">/43</span></dd>
+        <span class="note">Survived independent refutation.</span>
+      </div>
+      <div class="metric">
+        <dt>Defects in my own code</dt>
+        <dd>28</dd>
+        <span class="note">Found by adversarial review, all fixed.</span>
+      </div>
+      <div class="metric">
+        <dt>New runtime deps</dt>
+        <dd>0</dd>
+        <span class="note">MCP speaks JSON-RPC over stdio directly.</span>
+      </div>
+    </dl>
+  </div>
+
+  <!-- ============ THE BLOCKER ============ -->
+  <div class="wrap">
+    <section>
+      <h2>The one that mattered</h2>
+      <p class="h2-sub">Nothing in the design ever made an agent start working</p>
+
+      <div class="callout">
+        <p class="lede">The spec's own model dead-ended, and it took two facts to see why.</p>
+        <p>
+          §4 said an MCP server cannot push work into an idle session, then designed a queue whose
+          copy promised the agent would “pick this up on its next check”. There was no next check:
+          the four-step setup never armed one. A first-time user would link a session, press Send,
+          and watch <em>Queued</em> forever — failing the spec's own headline acceptance criterion.
+        </p>
+        <p>
+          The premise was also wrong for Claude Code specifically. <strong>Channels</strong> do exactly
+          what §4 says is impossible — an MCP server pushing events into a running session. The pull
+          model is still the right v1 call (channels are research preview, Anthropic-auth only, and
+          Cline has no equivalent), but that's a decision, not an impossibility. Separately, a tool
+          call outliving ~2 minutes is moved to a background task, so the specced 600-second blocking
+          long-poll is not the control flow that actually runs.
+        </p>
+        <p>
+          <strong>Resolved by making the state visible instead of pretending it away.</strong> A linked
+          session that isn't watching gets a hollow chip dot rather than a solid one, and the composer
+          says so with the exact phrase to type. Arming happens once; the tool re-arms itself after
+          every request.
+        </p>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ DECISIONS ============ -->
+  <div class="wrap">
+    <section>
+      <h2>Open questions</h2>
+      <p class="h2-sub">Answered on your behalf, as asked</p>
+
+      <div class="decisions">
+        <div class="decision">
+          <span class="q">Queue depth — §13 Q1</span>
+          <span class="a">One request in flight; the composer is replaced by the status view.</span>
+          <span class="why">
+            What the prototype already assumed, so a second Send is unreachable by construction — but the
+            broker refuses it too, because “unreachable in the UI” is not a security property. Cancel is
+            offered while queued; once the agent has claimed the work it can't be recalled, so the action
+            is honestly labelled <em>Stop showing this</em> rather than Cancel.
+          </span>
+        </div>
+        <div class="decision">
+          <span class="q">Local models</span>
+          <span class="a">Cline→ollama works today. Driving ollama directly is out of scope.</span>
+          <span class="why">
+            Cline is an MCP client and shows up as a normal session row. Driving a model directly has no
+            session to link and would force the plugin to own the write and the diff approval — the one
+            thing §6 refuses. Documented as a limitation rather than left open.
+          </span>
+        </div>
+        <div class="decision">
+          <span class="q">Textarea focus key</span>
+          <span class="a">A separate <code>aiFocus</code> field, not a widened <code>Focus</code> type.</span>
+          <span class="why">
+            The CSS editor's focus type describes a declaration cell (<code>ri</code>, <code>di</code>,
+            <code>p|v</code>) and cannot name a prompt box. The two tabs now own separate focus state, so
+            neither can restore focus into a pane that isn't rendered.
+          </span>
+        </div>
+        <div class="decision">
+          <span class="q">Prototype vs. spec geometry</span>
+          <span class="a">44px tab row, 93px body top — measured, not quoted.</span>
+          <span class="why">
+            The spec says 37px in three places; both prototypes render 44. The spec author appears to have
+            measured the inner segmented control and missed its padding and border. The prototype's own
+            <code>top:83px</code> is stale against its own layout and paints over the tab row.
+          </span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ SECURITY ============ -->
+  <div class="wide">
+    <section>
+      <div class="wrap" style="max-width:760px;margin:0 auto 20px">
+        <h2>Security</h2>
+        <p class="h2-sub">The CSS editor had no gate at all</p>
+        <p>
+          §6 describes itself as extending a hardened baseline documented in <code>HARDENING.md</code>.
+          That file has never existed in this repository — not in the working tree, not in any commit.
+          Neither did the security test suite it cites. There was no baseline to extend.
+        </p>
+      </div>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Surface</th><th scope="col">Was</th><th scope="col">Now</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="what">Cross-site writes to <code>/apply</code>, <code>/style</code>, <code>/edit</code></td>
+              <td class="was">any page could POST</td>
+              <td class="now">same-origin + a header no form can set</td>
+            </tr>
+            <tr>
+              <td class="what">DNS rebinding</td>
+              <td class="was">unguarded</td>
+              <td class="now">IP literals and *.localhost only</td>
+            </tr>
+            <tr>
+              <td class="what">Symlink escaping the project root</td>
+              <td class="was">followed and written</td>
+              <td class="now">realpath-checked, refused</td>
+            </tr>
+            <tr>
+              <td class="what"><code>&lt;/style&gt;</code> in a whole-block save</td>
+              <td class="was">wrote script into the component</td>
+              <td class="now">refused outright</td>
+            </tr>
+            <tr>
+              <td class="what">Agent bearer token</td>
+              <td class="was">served over plain HTTP</td>
+              <td class="now">user registry only, 0600 in 0700</td>
+            </tr>
+            <tr>
+              <td class="what">Agent routes</td>
+              <td class="was">—</td>
+              <td class="now">loopback + token + no browser Origin</td>
+            </tr>
+            <tr>
+              <td class="what">Outbound requests</td>
+              <td class="was">Google Fonts, unconditional</td>
+              <td class="now">opt-out via <code>fonts: false</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ CRITICALS ============ -->
+  <div class="wrap">
+    <section>
+      <h2>Critical defects</h2>
+      <p class="h2-sub">Two inherited, two of my own</p>
+
+      <div class="findings">
+        <article class="finding">
+          <div class="finding-head">
+            <span class="chip crit">Critical</span>
+            <span class="chip pre">Pre-existing</span>
+            <span class="finding-title">Whole-block save was a source-injection primitive</span>
+          </div>
+          <p>
+            <code>applyStyleBlock</code> spliced client text into the <code>.svelte</code> file verbatim.
+            A payload containing <code>&lt;/style&gt;</code> closed the block early and everything after it
+            became markup or script — under SSR, code execution in the dev server. postcss parses such a
+            string happily, so the completeness check never caught it. Reachable from any page before the
+            origin guards landed.
+          </p>
+          <p class="fix"><b>Fixed.</b> Refused before the write, with the obfuscated spellings covered.
+            The sibling <code>/apply</code> and <code>/edit</code> paths were verified safe — postcss escapes the
+            <code>&lt;</code> when it re-serializes.</p>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head">
+            <span class="chip crit">Critical</span>
+            <span class="chip pre">Mine</span>
+            <span class="finding-title">The agent token was served over HTTP</span>
+          </div>
+          <p>
+            I put the lockfile at <code>&lt;root&gt;/node_modules/.stylewright/dev.json</code>, as the spec
+            specified. That path is inside the tree Vite serves, so the dev server handed the bearer token
+            to any unauthenticated GET — verified live with curl. The 0600 mode I'd added was irrelevant;
+            the leak was over the network, not the filesystem.
+          </p>
+          <p class="fix"><b>Fixed.</b> The token now lives only in a user-level registry outside the root,
+            plus <code>fs.deny</code> as defence-in-depth for files an older version may have left behind.
+            The registry is also the more capable option — it's what makes monorepo layouts work.</p>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head">
+            <span class="chip crit">Critical</span>
+            <span class="chip pre">Mine</span>
+            <span class="finding-title">A dying agent silently swallowed the next request</span>
+          </div>
+          <p>
+            The liveness design hung on <code>req.on('close')</code>, attached after the body was already
+            drained — by which point Node had emitted it. So a killed agent still read as
+            <em>watching</em>, the next Send was handed to a socket nobody was reading, and the panel
+            showed <em>working</em> forever for a run no agent ever saw.
+          </p>
+          <p class="fix"><b>Fixed.</b> Liveness now hangs off the response, and a claim that resolves onto a
+            dead socket is put back on the queue rather than lost. Pinned by an end-to-end regression test
+            that aborts a real claim mid-flight.</p>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head">
+            <span class="chip high">High</span>
+            <span class="chip pre">Pre-existing</span>
+            <span class="finding-title">The whole overlay was rendering in Times</span>
+          </div>
+          <p>
+            <code>:host { all: initial }</code> resets <code>font-family</code> to the browser default, and
+            nothing re-established it — so every element that didn't name a family inherited serif,
+            including the existing panel header. IBM Plex was loading fine and going unused.
+          </p>
+          <p class="fix"><b>Fixed</b> in one line in the shadow stylesheet, which repairs the existing chrome
+            as well as the new tab.</p>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ WHAT WAS BUILT ============ -->
+  <div class="wide">
+    <section>
+      <div class="wrap" style="max-width:760px;margin:0 auto 20px">
+        <h2>What was built</h2>
+        <p class="h2-sub">All four phases, plus the security retrofit</p>
+      </div>
+      <div class="files">
+        <div class="filegroup">
+          <h3>Browser overlay</h3>
+          <ul>
+            <li><span class="path">client/panel.ts</span><span class="desc">Ask AI tab, session chip, both binding surfaces, six status states — plus four plumbing fixes so the CSS editor keeps its caret, its shortcuts and its undo timeline.</span></li>
+            <li><span class="path">client/aiCopy.ts <span class="new">new</span></span><span class="desc">Every user-visible string in one place, so “the deck is the source of truth” is enforced by a test rather than hoped for.</span></li>
+          </ul>
+        </div>
+        <div class="filegroup">
+          <h3>Dev server</h3>
+          <ul>
+            <li><span class="path">server/ai/broker.ts <span class="new">new</span></span><span class="desc">Queue, session registry, explicit binding, socket-based liveness, SSE fan-out. Never writes a file.</span></li>
+            <li><span class="path">server/ai/routes.ts <span class="new">new</span></span><span class="desc">Overlay and agent surfaces, with the request rebuilt from an allowlist rather than passed through.</span></li>
+            <li><span class="path">server/guard.ts <span class="new">new</span></span><span class="desc">Origin, Host and token gates, with the threat model written down.</span></li>
+            <li><span class="path">server/paths.ts <span class="new">new</span></span><span class="desc">One containment check, lexical then post-realpath.</span></li>
+          </ul>
+        </div>
+        <div class="filegroup">
+          <h3>MCP server</h3>
+          <ul>
+            <li><span class="path">mcp/server.ts <span class="new">new</span></span><span class="desc">stdio JSON-RPC by hand — three tools, no SDK, no new dependency for consumers.</span></li>
+            <li><span class="path">mcp/discover.ts <span class="new">new</span></span><span class="desc">Finds the dev server from wherever the agent runs, and refuses to guess between two.</span></li>
+          </ul>
+        </div>
+        <div class="filegroup">
+          <h3>Tests</h3>
+          <ul>
+            <li><span class="path">middleware.security.test.ts <span class="new">new</span></span><span class="desc">30 cases — the suite the spec assumed already existed.</span></li>
+            <li><span class="path">panel.ai.test.ts <span class="new">new</span></span><span class="desc">26 cases, including that ⌘S in the AI tab writes no CSS.</span></li>
+            <li><span class="path">broker.test.ts · mcp.test.ts <span class="new">new</span></span><span class="desc">46 cases, with the full loop exercised over real HTTP.</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ VERIFICATION ============ -->
+  <div class="wrap">
+    <section>
+      <h2>Verified</h2>
+      <p class="h2-sub">Not just green tests</p>
+      <ul class="checks">
+        <li><span class="tick">✓</span><span>309 tests, typecheck and build all clean<span class="sub">The 112 pre-existing tests were never edited.</span></span></li>
+        <li><span class="tick">✓</span><span>Full loop against the real playground<span class="sub">Real MCP binary, real dev server: select → prompt → claim → report → “Change applied” with the file list.</span></span></li>
+        <li><span class="tick">✓</span><span>Both discovery layouts<span class="sub">Agent inside the Vite root, and above it — the monorepo case the spec's walk-up design would have broken.</span></span></li>
+        <li><span class="tick">✓</span><span>Every guard exercised against the live server<span class="sub">Cross-origin, header-less, rebound-host, tokenless, and the injection payload — all refused; the legitimate write still returns 200 and the source tree is untouched.</span></span></li>
+        <li><span class="tick">✓</span><span>OpenCode, against the real binary<span class="sub">The generated config connects (<code>opencode mcp list</code> → connected); its handshake sends <code>clientInfo.name: "opencode"</code>, so the session badges correctly and reports a real cwd rather than Cline's <code>/</code>.</span></span></li>
+        <li><span class="tick">✓</span><span>A full round trip on an OpenCode-identical client<span class="sub">Same clientInfo, same protocol version, same progress token: registered, linked, held a 70-second watch through seven heartbeats, and received the request typed into the browser.</span></span></li>
+        <li><span class="tick">✓</span><span>The UI, in a browser<span class="sub">Geometry measured at 44px / 93px in the built overlay, matching the prototype rather than the spec.</span></span></li>
+      </ul>
+    </section>
+  </div>
+
+  <!-- ============ VENDORS ============ -->
+  <div class="wrap">
+    <section>
+      <h2>Three agents, one table</h2>
+      <p class="h2-sub">And what measuring OpenCode turned up</p>
+
+      <div class="callout">
+        <p class="lede">Every client kills a blocking tool call eventually, and they disagree about when, in what unit, and whether you can change it.</p>
+        <p>That number was scattered across the MCP process, the broker and the overlay — which is how the
+          overlay once told Cline users to run a <code>claude</code> command. It now lives in one file,
+          <code>src/shared/vendors.ts</code>, and everything else is derived from it: the watch budget, the
+          session badge, the setup steps, the generated config, and the sentence naming which tools are on
+          offer. Adding a vendor is an entry in that table and nothing else.</p>
+        <p>Settings → Agents lists all three with a switch and a Setup button each. The switch only controls
+          whose instructions you are shown — any MCP client that speaks the protocol still connects. The
+          preference is stored as the <em>disabled</em> list, so a vendor added in a later release appears
+          for people who already have settings saved instead of staying invisible.</p>
+      </div>
+
+      <div class="findings">
+        <article class="finding">
+          <div class="finding-head"><span class="chip crit">Wrong</span><span class="finding-title">The research said OpenCode ignores per-server timeouts. It does not.</span></div>
+          <p>I built the first OpenCode entry on the claim that its <code>timeout</code> governs discovery
+            only, that execution is capped near 30 seconds, and that overrides are ignored — so the entry
+            shipped no timeout at all and a deliberately short 25-second watch.</p>
+          <p class="fix">Measured against the real 1.18.4 binary: a <code>timeout</code> of 3000 ms killed an
+            8-second call, no timeout killed a 70-second one at ~30 s, and a timeout of 90000 ms
+            <b>let the same 70-second call through</b>. The setting is honoured, it is in milliseconds — unlike
+            Cline's, which is in seconds — and the entry now ships it.</p>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="chip fixed">Fixed</span><span class="finding-title">The generated config asked for 59 minutes; the process silently gave 25</span></div>
+          <p>Both file-configured vendors write <code>STYLEWRIGHT_WATCH_MS</code> into the config the overlay
+            tells you to paste. The MCP process clamped that value to a fixed 1,500,000 ms ceiling — so the
+            watch ended less than halfway into the tool timeout it had been matched to, and the arming the
+            hour-long timeout was meant to buy expired anyway.</p>
+          <p class="fix">The ceiling is now <b>derived from the vendor table</b>, so a config we generate can
+            never be capped below the number we just told someone to paste. A test asserts it per vendor.</p>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="chip fixed">New</span><span class="finding-title">The watch heartbeats, so short client timeouts stop mattering</span></div>
+          <p>Reading OpenCode's bundle turned up <code>resetTimeoutOnProgress</code> on its tool calls: the
+            request timer restarts on every progress notification. <code>stylewright_watch</code> now emits
+            one every 10 seconds while it blocks — but only when the client supplied a progress token, since
+            sending progress for a token nobody issued is a protocol error elsewhere.</p>
+          <p class="fix">Confirmed live: an OpenCode-identical client held a watch for <b>70 seconds through
+            seven heartbeats</b>, past the ~30-second cap it would otherwise have hit, and took the request
+            the browser sent.</p>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="chip fixed">Fixed</span><span class="finding-title">“That session isn’t watching” — shown while it was working on your task</span></div>
+          <p>A session that has just taken a request stops watching until it re-arms. The nudge fired in that
+            window, directly beneath a card saying the same session was running the request. It reads as a bug
+            in the panel and sends you off to retype an instruction the agent does not need. It is now
+            suppressed while a request is in flight, and returns if the session goes quiet afterwards.</p>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section>
+      <h2>What each client actually does</h2>
+      <p class="h2-sub">Measured, not quoted</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Client</th><th>Registers via</th><th>Timeout unit</th><th>Unconfigured</th><th>What we ship</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Claude Code</td><td><code>claude mcp add</code></td><td>—</td><td>Backgrounds at ~2 min</td><td>25 min watch</td></tr>
+            <tr><td>Cline</td><td><code>cline_mcp_settings.json</code></td><td>seconds</td><td>60 s, call killed</td><td>3600 s timeout, 59 min watch</td></tr>
+            <tr><td>OpenCode</td><td><code>opencode.json</code></td><td>milliseconds</td><td>~30 s, call killed</td><td>3600000 ms timeout, 59 min watch</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ REMAINING ============ -->
+  <div class="wrap">
+    <section>
+      <h2>Worth knowing</h2>
+      <p class="h2-sub">Open items and deliberate omissions</p>
+
+      <div class="findings">
+        <article class="finding">
+          <div class="finding-head"><span class="chip pre">Decide</span><span class="finding-title">The handoff document is now wrong in 27 places</span></div>
+          <p>I built against reality, not the spec, wherever they disagreed. If the document has a life
+            beyond this session it needs the geometry, the security section, the copy deck and §4's framing
+            corrected — otherwise the next reader inherits the same dead end.</p>
+        </article>
+        <article class="finding">
+          <div class="finding-head"><span class="chip pre">Deferred</span><span class="finding-title">Light mode for the overlay chrome</span></div>
+          <p>The spec's six-value light palette doesn't reproduce the prototype's light pair, which uses
+            roughly fourteen. Left as a Phase-4 item rather than shipped half-derived; the summary you're
+            reading is themed, the overlay is not yet.</p>
+        </article>
+        <article class="finding">
+          <div class="finding-head"><span class="chip pre">By design</span><span class="finding-title">Untrusted page content reaches the agent</span></div>
+          <p>A request carries the selected element's markup and text. If you're previewing someone else's
+            user-generated content, that text lands in your agent's context. Documented in the README rather
+            than papered over — it's inherent to what the feature does.</p>
+        </article>
+        <article class="finding">
+          <div class="finding-head"><span class="chip fixed">Note</span><span class="finding-title"><code>handoff_stylewright_ai/</code> is now gitignored</span></div>
+          <p>Matching the existing rule that already covers <code>design_handoff/</code> and
+            <code>.design/</code> — “local design scratch, reference only, never published”. Reverse it if you
+            intended to commit this one.</p>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <section>
+      <details>
+        <summary>How the two review passes worked</summary>
+        <div class="inner">
+          <p>Both passes used the same shape: independent reviewers over separate lenses, then a
+            second adversarial agent per finding whose job was to <em>refute</em> it by opening the files
+            itself — defaulting to “refuted” unless it could confirm the claim in the source.</p>
+          <p>The first pass audited the handoff against the repo: 43 candidate disagreements, 27 survived.
+            The second reviewed my own implementation across six lenses: 29 candidates, 25 survived. The
+            refuted ones mattered too — they stopped me from “fixing” three things that were already correct,
+            including a suspected undo-timeline regression that the existing dedupe already prevented.</p>
+          <p>The token leak and the lost-request bug both came out of the second pass. Neither would have
+            been caught by the test suite as I'd written it, because both were failures of a premise I held
+            while writing the tests.</p>
+        </div>
+      </details>
+    </section>
+  </div>
+
+  <div class="wrap">
+    <footer>
+      <span>vite-plugin-stylewright</span>
+      <span class="dot">·</span>
+      <span>309 tests green</span>
+      <span class="dot">·</span>
+      <span>0 new runtime dependencies</span>
+      <span class="dot">·</span>
+      <span>nothing committed — working tree only</span>
+    </footer>
+  </div>
+
+</div>

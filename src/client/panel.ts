@@ -16,10 +16,31 @@ import {
 } from './color.js';
 import { fromServerRules, toServerRules, cloneRules, type Rule } from './rules.js';
 import { History, type HistState } from './history.js';
-import type { SwRule, SwAtRule, SwStyleSaveResponse, SwApplyResponse } from '../shared/protocol.js';
+import type {
+	SwRule, SwAtRule, SwStyleSaveResponse, SwApplyResponse,
+	SwAiState, SwAiSession, SwAiRequest, SwAiSendResponse, SwAiTask
+} from '../shared/protocol.js';
+import { SW_AI_LIMITS } from '../shared/protocol.js';
+import { usefulCwd } from '../shared/cwd.js';
+import { VENDORS, DEFAULT_VENDOR, vendorById, type AgentVendor } from '../shared/vendors.js';
+import { AI_COPY, fill } from './aiCopy.js';
 import { describe, resolveFile, shortPath, tagLabel, buildDomTree, pathPrefixes } from './inspect.js';
 import type { PickMeta, DomNode } from './inspect.js';
 export type { PickMeta } from './inspect.js';
+
+/** The AI path's server glue. Optional on PanelHost: when it is absent the tab
+ *  row is hidden entirely and the panel is exactly the CSS editor it was. */
+export interface AiHost {
+	state(): Promise<SwAiState>;
+	link(sessionId: string): Promise<SwAiState>;
+	unlink(): Promise<SwAiState>;
+	refresh(): Promise<SwAiState>;
+	clear(): Promise<SwAiState>;
+	cancel(requestId: string): Promise<SwAiState>;
+	send(req: SwAiRequest): Promise<SwAiSendResponse>;
+	/** Subscribe to state snapshots; returns an unsubscribe. */
+	subscribe(onState: (s: SwAiState) => void): () => void;
+}
 
 /** Server glue the overlay needs — provided by the boot module. */
 export interface PanelHost {
@@ -32,6 +53,8 @@ export interface PanelHost {
 	/** Legacy flat whole-block save (POST /style). Kept for back-compat; not used by
 	 *  the panel anymore because it can't represent at-rules. */
 	saveCss(file: string, css: string): Promise<SwStyleSaveResponse>;
+	/** Present only when the AI path is enabled. */
+	ai?: AiHost;
 }
 
 type Dock = 'left' | 'right' | 'bottom' | 'float';
@@ -51,6 +74,9 @@ interface FloatPos { x: number | null; y: number | null; }
 /** CSS/HTML split fractions: `col` = CSS top-pane height (left/right dock),
  *  `row` = HTML left-pane width (bottom dock). */
 interface Split { col: number; row: number; }
+
+/** Which pane the panel body is showing. */
+export type BodyTab = 'styles' | 'ai' | 'settings';
 
 interface State {
 	dock: Dock;
@@ -98,7 +124,67 @@ interface State {
 	realW: number;
 	/** Rule index whose @media breakpoint is being edited inline (null = none). */
 	editBp: number | null;
+	/** In-progress text of that inline editor. Held in state because the panel now
+	 *  re-renders on background events (an SSE snapshot from the broker), and a
+	 *  field whose value came straight from the source model would lose whatever
+	 *  the user had typed the moment one arrived. */
+	editBpText: string | null;
+
+	// ---- AI path. All JSON-safe: setState's change detection stringifies. ----
+	/** Which tab the body shows. Orthogonal to `view` — `no-meta` still wins. */
+	aiTab: BodyTab;
+	/** Last snapshot from the broker (GET /ai/state, then SSE). */
+	ai: SwAiState | null;
+	/** Which binding surface is open: the session list, or the setup checklist. */
+	/** The session dropdown hanging off the destination chip. Nothing else
+	 *  floats any more — setup lives in Settings. */
+	aiPop: null | 'list';
+	/** The surface was opened by a blocked Send → body-takeover presentation, and
+	 *  it must NOT dismiss on outside click (the user is mid-task). */
+	/** Send was pressed with nothing linked. An inline banner, not a takeover. */
+	sendBlocked: boolean;
+	aiRefreshing: boolean;
+	/** Result line beside Refresh — always says something, never a dead end. */
+	aiCheckNote: string;
+	/** Draft for the current element. */
+	prompt: string;
+	/** Focus key for the prompt textarea — the CSS editor's `focus` type is
+	 *  (ri, di, field) and cannot describe it, so the AI tab carries its own. */
+	aiFocus: string | null;
+	/** The linked-but-not-watching nudge has been dismissed for this session. */
+	aiArmDismissed: boolean;
+	/** Which vendor the setup screen is giving instructions for. They register an
+	 *  MCP server in completely different ways, so this is not cosmetic. */
+	aiTool: string;
+	/** Vendor ids the user wants offered. Someone who only runs Claude Code should
+	 *  not have to scroll past two other products to find their command. */
+	vendorsOn: string[];
+	/**
+	 * Is the element picker live while the panel is open?
+	 *
+	 * On by default: needing to arm the picker before every re-target was pure
+	 * ceremony — you already said what you wanted by clicking a different element.
+	 * The cost is that a pick swallows the click, so you cannot press your own
+	 * app's buttons; the crosshair in the header suspends picking for exactly that.
+	 */
+	picking: boolean;
+	/** The PREFERENCE behind `picking` — whether the picker arms itself at all.
+	 *  Off means the classic behaviour: the crosshair arms one pick at a time. */
+	autoPick: boolean;
+	/** Settings popover open. */
+	/** Which vendor's setup the Settings tab is drilled into, if any. */
+	settingsVendor: string | null;
+	/** The vendor dropdown on the connect-an-agent screen. */
+	vendorMenu: boolean;
+	/** Bottom-dock only: width of the task log, as a fraction. The composer takes
+	 *  the rest. Separate from `split` so dragging one layout does not move the
+	 *  other. */
+	aiSplit: number;
 }
+
+/** data-fkey of the prompt textarea. Stable across re-renders so the caret and
+ *  focus survive the rebuild that every keystroke triggers. */
+const AI_PROMPT_KEY = 'ai-prompt';
 
 type SvgEl = HTMLElement & SVGElement;
 const ic = (size: number, vb: string, opts: ElProps, ...kids: SvgEl[]): SvgEl =>
@@ -129,8 +215,8 @@ const TREE_OPEN_DEPTH = 2;
 // The FAB stays a plain click (pointer) cursor until you've hovered it this long —
 // only then does it reveal the grab hand, so it doesn't read as "always draggable".
 const FAB_GRAB_DELAY = 2000;
-// The dragged launcher position persists across reloads (the rest of the panel's
-// layout stays in-memory). Guarded so private-mode / disabled storage can't throw.
+// The dragged launcher position persists across reloads. Guarded so private-mode
+// / disabled storage can't throw.
 const FAB_POS_KEY = '__stylewright_fab';
 function loadFabPos(): FloatPos {
 	try {
@@ -141,6 +227,213 @@ function loadFabPos(): FloatPos {
 }
 function saveFabPos(p: FloatPos): void {
 	try { localStorage.setItem(FAB_POS_KEY, JSON.stringify(p)); } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence.
+//
+// A dev overlay is used ACROSS reloads — you change something, refresh, look
+// again. Losing the panel every time (and landing back on the wrong tab, at the
+// default dock, with the DOM pane off) means re-doing the same four clicks on
+// every refresh. Only the launcher position used to survive, which made the rest
+// feel like a bug rather than a decision.
+//
+// What is NOT persisted: the picked ELEMENT. `pickedEl` is a live DOM node and a
+// reload destroys the whole document, so the file is restored and its rules are
+// re-read, but the element-level focus filter and tree selection start clean —
+// pretending otherwise would mean pointing at a node that no longer exists.
+// ---------------------------------------------------------------------------
+const UI_STATE_KEY = '__stylewright_ui';
+const UI_STATE_VERSION = 1;
+
+interface PersistedUi {
+	v: number;
+	dock: Dock;
+	size: Size;
+	float: FloatPos;
+	split: Split;
+	floatTab: 'css' | 'html';
+	showHtml: boolean;
+	aiTab: 'styles' | 'ai';
+	aiTool: string;
+	/** Stored as the OFF list so a vendor added later shows up for people who
+	 *  already have settings saved. */
+	vendorsOff: string[];
+	picking: boolean;
+	autoPick: boolean;
+	focusPick: boolean;
+	aiSplit: number;
+	colorHistory: string[];
+	/** Was the panel on screen (as opposed to closed or mid-pick)? */
+	open: boolean;
+	/** Last edited component, so a reload lands back in it. */
+	file: string | null;
+	meta: PickMeta | null;
+}
+
+function loadUi(): Partial<PersistedUi> {
+	try {
+		const raw = localStorage.getItem(UI_STATE_KEY);
+		if (!raw) return {};
+		const p = JSON.parse(raw) as PersistedUi;
+		// A bumped version means the shape changed; start fresh rather than merge
+		// half-understood fields into live state.
+		if (!p || p.v !== UI_STATE_VERSION) return {};
+		return p;
+	} catch {
+		return {};
+	}
+}
+function saveUi(p: PersistedUi): void {
+	try { localStorage.setItem(UI_STATE_KEY, JSON.stringify(p)); } catch { /* private mode, quota — never fatal */ }
+}
+
+/** Only accept values we still understand; a hand-edited or stale entry must not
+ *  be able to put the panel into a state it cannot render. */
+const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+	(allowed as readonly unknown[]).includes(v) ? (v as T) : fallback;
+
+const num = (v: unknown, lo: number, hi: number, fallback: number): number =>
+	typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : fallback;
+
+/** A persisted size from a much larger monitor must not leave the panel wider
+ *  than today's window — restoring a layout you cannot see is worse than the
+ *  default one. Clamped again at render time by the resize handles. */
+function sanitizeSize(s: Partial<Size> | undefined): Size {
+	const maxW = Math.max(300, window.innerWidth - 60);
+	const maxH = Math.max(240, window.innerHeight - 90);
+	return {
+		side: num(s?.side, 300, maxW, Math.min(392, maxW)),
+		bottom: num(s?.bottom, 240, maxH, Math.min(300, maxH)),
+		floatW: num(s?.floatW, 300, maxW, Math.min(418, maxW)),
+		floatH: num(s?.floatH, 240, maxH, Math.min(540, maxH))
+	};
+}
+function sanitizeSplit(s: Partial<Split> | undefined): Split {
+	return { col: num(s?.col, 0.2, 0.85, 0.6), row: num(s?.row, 0.2, 0.85, 0.4) };
+}
+
+// ---------- AI request helpers (module-level: pure, and unit-testable) ----------
+
+/** crypto.randomUUID with a fallback — jsdom/happy-dom and non-secure origins
+ *  don't always provide it, and a missing id would break correlation. */
+function uuid(): string {
+	try {
+		const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+		if (c?.randomUUID) return c.randomUUID();
+	} catch { /* fall through */ }
+	return 'sw-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now().toString(36);
+}
+
+/** Trim markup to a budget on a tag boundary, so the agent never receives a
+ *  half-open element that changes what the snippet appears to mean. */
+const TRUNC_MARK = '\n<!-- truncated -->';
+export function truncateHtml(html: string, max: number): string {
+	if (!html || html.length <= max) return html || '';
+	// The marker has to fit INSIDE the budget. Appending it after slicing to `max`
+	// pushes the result over, and the server re-slices to exactly `max` — which
+	// chops the marker in half and leaves the agent unable to tell that the markup
+	// it is reasoning about was cut short.
+	const room = Math.max(0, max - TRUNC_MARK.length);
+	const cut = html.slice(0, room);
+	const lastClose = cut.lastIndexOf('>');
+	return (lastClose > 0 ? cut.slice(0, lastClose + 1) : cut) + TRUNC_MARK;
+}
+
+/** The handful of computed properties worth sending. Deliberately NOT a full
+ *  getComputedStyle dump: that is ~340 properties of noise per request, and the
+ *  agent has the component's real source rules anyway. */
+const COMPUTED_KEYS = [
+	'display', 'position', 'flex-direction', 'justify-content', 'align-items', 'gap',
+	'width', 'height', 'padding', 'margin', 'font-size', 'font-weight', 'line-height',
+	'color', 'background-color', 'border-radius', 'border', 'box-shadow', 'opacity'
+];
+export function interestingComputed(node: Element): Record<string, string> | undefined {
+	let cs: CSSStyleDeclaration;
+	try { cs = getComputedStyle(node); } catch { return undefined; }
+	const out: Record<string, string> = {};
+	for (const k of COMPUTED_KEYS) {
+		const v = cs.getPropertyValue(k);
+		if (v && v.trim()) out[k] = v.trim().slice(0, 200);
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+/** Vendor ids to list, from the stored OFF list. Never returns empty — with
+ *  everything switched off the setup screen would have nothing to say. */
+export function enabledFrom(off: unknown): string[] {
+	const hidden = Array.isArray(off) ? off.filter((v): v is string => typeof v === 'string') : [];
+	const on = VENDORS.filter((v) => !hidden.includes(v.id)).map((v) => v.id);
+	return on.length ? on : VENDORS.map((v) => v.id);
+}
+
+/** `/Users/greg/dev/app` → `~/dev/app`, best effort (the browser has no $HOME,
+ *  so we match the shape the MCP process reports). */
+export function tildePath(p: string): string {
+	const s = (p || '').replace(/\\/g, '/');
+	const m = s.match(/^\/(?:Users|home)\/[^/]+(\/.*)?$/);
+	return m ? '~' + (m[1] || '') : s;
+}
+
+/**
+ * The config text for a vendor that is set up by file rather than by command.
+ * Every number in it comes from the vendor table, so the JSON we print and the
+ * watch budget the MCP process enforces cannot drift apart — the pair
+ * `timeout` / `STYLEWRIGHT_WATCH_MS` is the whole reason this is generated
+ * rather than pasted into the copy deck. A watch that outlives its client's
+ * limit gets killed mid-call, which ends the agent's turn and makes a human
+ * retype "watch for Stylewright edits".
+ */
+export function vendorConfigJson(vendor: AgentVendor, command: string): string {
+	if (!vendor.register.json) return '';
+	return JSON.stringify(vendor.register.json.build(command, vendor.configuredWatchMs), null, 2);
+}
+
+/** "58 minutes", "50 seconds" — rounded, because the exact figure is noise and
+ *  the only thing the reader needs is the order of magnitude. */
+export function humanDuration(ms: number): string {
+	const s = Math.round(ms / 1000);
+	if (s < 90) return `${s} seconds`;
+	const m = Math.round(s / 60);
+	if (m < 90) return `${m} minute${m === 1 ? '' : 's'}`;
+	const h = Math.round(m / 60);
+	return `${h} hour${h === 1 ? '' : 's'}`;
+}
+
+/** Two overlapping sheets — the near-universal copy affordance. */
+function copyGlyph(): SvgEl {
+	return ic(11, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+		el('rect', { x: 9, y: 9, width: 11, height: 11, rx: 2 }),
+		pth('M5 15V5a2 2 0 0 1 2-2h10'));
+}
+
+/**
+ * Clipboard write with a fallback. `navigator.clipboard` needs a secure context,
+ * and a dev server on plain http://192.168.x.x — which `vite --host` gives you —
+ * is not one, so the modern API is simply absent exactly where someone is most
+ * likely to be reading setup instructions.
+ */
+export async function copyText(text: string): Promise<boolean> {
+	try {
+		if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+	} catch { /* fall through to the legacy path */ }
+	try {
+		const ta = document.createElement('textarea');
+		ta.value = text;
+		ta.setAttribute('readonly', '');
+		ta.style.cssText = 'position:fixed;top:-9999px;opacity:0;';
+		document.body.appendChild(ta);
+		ta.select();
+		const ok = document.execCommand('copy');
+		document.body.removeChild(ta);
+		return ok;
+	} catch {
+		return false;   // the button says "Press ⌘C" and the text is already select-all
+	}
+}
+
+function prefersLight(): boolean {
+	try { return window.matchMedia('(prefers-color-scheme: light)').matches; } catch { return false; }
 }
 
 /** Equality for setState change-detection: identity, then a JSON fallback for the
@@ -179,6 +472,20 @@ export class Panel {
 	private shownPops = new Set<string>();
 	private nextPops = new Set<string>();
 	private saveTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Per-element prompt drafts, keyed by file+selector, so a re-select or a trip
+	 *  through the setup checklist never loses typing. A private field, not state:
+	 *  it must not participate in setState's change detection. */
+	private drafts: Record<string, string> = {};
+	/** Unsubscribe from the broker's SSE stream. */
+	private aiUnsub: (() => void) | null = null;
+	/** Component to reopen from the previous page, applied once after boot. */
+	private restore: { file: string; meta: PickMeta | null } | null = null;
+	/** The pane Settings was opened from, so closing it goes back rather than
+	 *  dumping you on whichever tab happens to be first. */
+	private lastBodyTab: 'styles' | 'ai' = 'styles';
+	private uiSaveTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Task log is following the newest card (rather than parked on an old one). */
+	private logPinned = true;
 	private keyHandler: (e: KeyboardEvent) => void;
 	private downHandler: (e: MouseEvent) => void;
 	private reanchorHandler: () => void;
@@ -190,35 +497,73 @@ export class Panel {
 		this.host = host;
 		this.rootEl = document.createElement('div');
 		this.shadow.appendChild(this.rootEl);
+		const ui = loadUi();
 		this.state = {
-			dock: 'right',
+			dock: oneOf(ui.dock, ['left', 'right', 'bottom', 'float'] as const, 'right'),
 			view: 'closed',
 			float: { x: null, y: null },
 			fab: loadFabPos(),
-			size: { side: 392, bottom: 300, floatW: 418, floatH: 540 },
-			colorHistory: [],
+			size: sanitizeSize(ui.size),
+			colorHistory: Array.isArray(ui.colorHistory) ? ui.colorHistory.slice(0, 18).filter((c) => typeof c === 'string') : [],
 			focus: null, color: null, menu: null, acIndex: 0,
 			status: { kind: 'idle', text: 'Pick an element to edit its styles' },
-			file: null, meta: null, rules: [], hl: null, focusPick: false,
-			split: { col: 0.6, row: 0.4 }, floatTab: 'css', htmlToggled: {}, showHtml: false, treeRev: 0,
-			whatIfWidth: null, realW: window.innerWidth, editBp: null
+			file: null, meta: null, rules: [], hl: null, focusPick: ui.focusPick !== false,
+			split: sanitizeSplit(ui.split),
+			floatTab: oneOf(ui.floatTab, ['css', 'html'] as const, 'css'),
+			htmlToggled: {}, showHtml: ui.showHtml === true, treeRev: 0,
+			whatIfWidth: null, realW: window.innerWidth, editBp: null, editBpText: null,
+			// `settings` is deliberately NOT restorable: it is somewhere you go to
+			// change one thing, not a place to be dropped back into on reload.
+			aiTab: oneOf(ui.aiTab, ['styles', 'ai'] as const, 'styles'),
+			ai: null, aiPop: null, sendBlocked: false,
+			aiRefreshing: false, aiCheckNote: '', prompt: '', aiFocus: null,
+			aiArmDismissed: false,
+			aiTool: vendorById(String(ui.aiTool)) ? String(ui.aiTool) : DEFAULT_VENDOR,
+			vendorsOn: enabledFrom(ui.vendorsOff),
+			picking: ui.autoPick !== false && ui.picking !== false,
+			autoPick: ui.autoPick !== false,
+			settingsVendor: null, vendorMenu: false,
+			aiSplit: num(ui.aiSplit, 0.2, 0.85, 0.6)
 		};
+		// Reopen where they left off. A dev overlay is used ACROSS reloads — you
+		// change something, refresh, look again — so closing on every refresh means
+		// repeating the same clicks each time.
+		this.restore = ui.open && typeof ui.file === 'string' ? { file: ui.file, meta: ui.meta ?? null } : null;
 
 		this.keyHandler = (e) => {
 			if (e.key === 'Escape') {
+				// Innermost surface first. The blocked checklist ignores outside clicks
+				// but must still yield to Escape, or it would be a trap.
 				if (this.state.color) { this.closeColorPicker(); return; }
+				if (this.state.vendorMenu) { this.setState({ vendorMenu: false }); return; }
+				// A drill-down inside Settings backs out one level before the tab closes.
+				if (this.state.settingsVendor) { this.setState({ settingsVendor: null }); return; }
+				if (this.state.aiPop) { this.setState({ aiPop: null }); return; }
+				if (this.state.menu) { this.setState({ menu: null, focus: null }); return; }
 				this.setState({ view: this.state.view === 'pick' ? 'closed' : this.state.view, menu: null, focus: null });
+				return;
 			}
+			// The CSS editor's shortcuts are window-level and have no target check, so
+			// in the Ask AI tab they would hijack the prompt box: ⌘Z/⌘Y would drive the
+			// CSS undo timeline instead of the browser's own text undo, and ⌘S would
+			// write CSS to the component from a tab that edits no CSS.
+			if (this.state.aiTab === 'ai') return;
 			const mod = e.metaKey || e.ctrlKey;
 			if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) this.redo(); else this.undo(); return; }
 			if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); this.redo(); return; }
 			if (mod && e.key.toLowerCase() === 's' && this.state.view === 'editing') { e.preventDefault(); this.save(); }
 		};
 		this.downHandler = (e) => {
-			if (!(this.state.color || this.state.menu)) return;
+			const aiDismissable = !!this.state.aiPop;
+			if (!(this.state.color || this.state.menu || aiDismissable || this.state.vendorMenu)) return;
 			const path = (e.composedPath ? e.composedPath() : []) as Element[];
 			const inPop = path.some((n) => n && n.classList && (n.classList.contains('sw-pop') || n.classList.contains('sw-pop-trigger')));
-			if (!inPop) { if (this.state.color) this.closeColorPicker(); if (this.state.menu) this.setState({ menu: null }); }
+			if (!inPop) {
+				if (this.state.color) this.closeColorPicker();
+				if (this.state.menu) this.setState({ menu: null });
+				if (aiDismissable) this.setState({ aiPop: null });
+				if (this.state.vendorMenu) this.setState({ vendorMenu: false });
+			}
 		};
 		// Keep an open popover glued to its trigger when the editor body scrolls or
 		// the window resizes — neither of which triggers a re-render on its own.
@@ -237,7 +582,41 @@ export class Panel {
 		window.addEventListener('resize', this.reanchorHandler);
 		window.addEventListener('resize', this.onResize);
 		this.rootEl.addEventListener('scroll', this.reanchorHandler, true); // capture: scroll doesn't bubble
+		this.initAi();
 		this.render();
+		// After the first paint, so the panel appears immediately and the rules load
+		// into it rather than the user watching a blank frame.
+		if (this.restore) {
+			const r = this.restore;
+			this.restore = null;
+			void this.pick(r.file, r.meta);
+		}
+	}
+
+	/** The slice of state worth surviving a reload. Written debounced — a drag
+	 *  resize fires setState ~60×/sec and localStorage is synchronous. */
+	private persistUi(): void {
+		clearTimeout(this.uiSaveTimer);
+		this.uiSaveTimer = setTimeout(() => this.writeUi(), 250);
+	}
+	private writeUi(): void {
+		const s = this.state;
+		saveUi({
+			v: UI_STATE_VERSION,
+			dock: s.dock, size: s.size, float: s.float, split: s.split,
+			floatTab: s.floatTab, showHtml: s.showHtml,
+			// Settings is never restored: it is somewhere you go to change one thing.
+			aiTab: s.aiTab === 'settings' ? this.lastBodyTab : s.aiTab, aiTool: s.aiTool, picking: s.picking, autoPick: s.autoPick,
+			// The OFF list, not the on list: a vendor added in a later release should
+			// appear for someone who already has settings saved, not stay invisible
+			// because their stored list predates it.
+			vendorsOff: VENDORS.filter((v) => !s.vendorsOn.includes(v.id)).map((v) => v.id),
+			focusPick: s.focusPick, aiSplit: s.aiSplit,
+			colorHistory: s.colorHistory,
+			// `pick` is a transient mode, not a place to come back to.
+			open: s.view === 'editing' || s.view === 'no-style' || s.view === 'no-meta',
+			file: s.file, meta: s.meta
+		});
 	}
 
 	destroy(): void {
@@ -247,13 +626,40 @@ export class Panel {
 		window.removeEventListener('resize', this.onResize);
 		if (this.resizeRaf) cancelAnimationFrame(this.resizeRaf);
 		this.rootEl.removeEventListener('scroll', this.reanchorHandler, true);
+		if (this.aiUnsub) { this.aiUnsub(); this.aiUnsub = null; }
+		clearTimeout(this.saveTimer);
+		clearTimeout(this.fabHoverTimer);
+		// Flush rather than drop: destroy() runs on teardown, which is exactly when
+		// the last debounced write would otherwise be lost.
+		clearTimeout(this.uiSaveTimer);
+		this.writeUi();
 		clear(this.rootEl);
 	}
+
+	/** Paint from the broker once, then follow its snapshots. Failing here is not
+	 *  fatal — the tab simply shows "no session" until a snapshot arrives. */
+	private initAi(): void {
+		const ai = this.host.ai;
+		if (!ai) return;
+		void ai.state().then((s) => this.setState({ ai: s })).catch(() => { /* offline broker */ });
+		try {
+			this.aiUnsub = ai.subscribe((s) => this.setState({ ai: s }));
+		} catch { /* no live channel — state() already gave us a first paint */ }
+	}
+	private aiEnabled(): boolean { return !!this.host.ai; }
 
 	/** Re-run the anchoring math on every currently-open popover against its trigger. */
 	private reanchorPopovers(): void {
 		const anchor = this.popoverRef();
-		this.rootEl.querySelectorAll<HTMLElement>('.sw-pop').forEach((node) => anchor(node));
+		this.rootEl.querySelectorAll<HTMLElement>('.sw-pop').forEach((node) => {
+			// Only surfaces anchored to the VIEWPORT can be re-anchored. The blocked
+			// setup takeover is absolutely positioned inside the panel and still
+			// carries right/bottom, so writing viewport coordinates into its left/top
+			// resolves its width to zero — the first-run screen simply disappears on
+			// a scroll.
+			if (node.style.position !== 'fixed') return;
+			anchor(node);
+		});
 	}
 
 	// ---------- state + render ----------
@@ -272,6 +678,7 @@ export class Panel {
 		}
 		Object.assign(this.state, p);
 		if (!changed) return;
+		this.persistUi();
 		if (!this.renderQueued) {
 			this.renderQueued = true;
 			queueMicrotask(() => { this.renderQueued = false; this.render(); });
@@ -281,6 +688,10 @@ export class Panel {
 	private render(): void {
 		const prevBody = this.rootEl.querySelector('[data-sw-editor]') as HTMLElement | null;
 		const scrollTop = prevBody ? prevBody.scrollTop : 0;
+		const prevLog = this.rootEl.querySelector('[data-sw-tasks]') as HTMLElement | null;
+		const logScroll = prevLog ? prevLog.scrollTop : 0;
+		// "Pinned" while they are within a line or so of the bottom.
+		if (prevLog) this.logPinned = prevLog.scrollHeight - prevLog.scrollTop - prevLog.clientHeight < 24;
 		const prevTree = this.rootEl.querySelector('[data-sw-tree]') as HTMLElement | null;
 		const treeScroll = prevTree ? prevTree.scrollTop : 0; // the DOM-tree pane scrolls independently
 		const caret = this.captureCaret(); // the rebuild destroys the focused input — keep its caret
@@ -294,11 +705,20 @@ export class Panel {
 		// layout; then flush refs (popover positioning) before the browser paints.
 		const body = this.rootEl.querySelector('[data-sw-editor]') as HTMLElement | null;
 		if (body) body.scrollTop = scrollTop;
+		// The task log follows the newest card unless the user has scrolled up to
+		// read an older one — jumping them back down mid-read would be hostile.
+		const log = this.rootEl.querySelector('[data-sw-tasks]') as HTMLElement | null;
+		if (log) log.scrollTop = this.logPinned ? log.scrollHeight : logScroll;
 		const tree = this.rootEl.querySelector('[data-sw-tree]') as HTMLElement | null;
 		if (tree) tree.scrollTop = treeScroll; // don't snap the DOM tree back to the top on re-render
 		this.restoreFocus(caret);
 		this.rebuilding = false;
 		flushRefs();
+		// Refs flush innermost-first — a child's ref is registered while its parent
+		// is still being built — so a popover nested inside another popover measures
+		// its trigger before the outer one has been moved off (0,0), and lands in the
+		// corner of the screen. Re-anchoring in DOM order fixes up the nested ones.
+		this.reanchorPopovers();
 		this.shownPops = this.nextPops; // commit — these popovers are "already shown" next render
 		this.history.record({ file: this.state.file, meta: this.state.meta, rules: this.state.rules }, Date.now());
 	}
@@ -313,33 +733,47 @@ export class Panel {
 	private fk(ri: number, di: number, field: string, tok?: number | string | null): string {
 		return ri + '-' + di + '-' + field + '-' + (tok == null ? '_' : tok);
 	}
+	/** Every focusable field in the panel, keyed by data-fkey. The prompt box is a
+	 *  <textarea>, so none of these lookups can assume INPUT. */
+	private fieldByKey(key: string): HTMLInputElement | HTMLTextAreaElement | null {
+		return this.rootEl.querySelector('input[data-fkey="' + key + '"], textarea[data-fkey="' + key + '"]');
+	}
 	private focusField(key: string): void {
 		// A deliberate cursor move (new declaration, prop→value, etc.). Plain focus +
 		// scrollIntoView so a freshly-added off-screen declaration becomes visible.
 		this.wantFocus = key;
 		setTimeout(() => {
-			const node = this.rootEl.querySelector('input[data-fkey="' + key + '"]') as HTMLInputElement | null;
+			const node = this.fieldByKey(key);
 			this.wantFocus = null; // clear even if the target is gone, so focus can never get stuck
 			if (node) { this.focusSilently(node); node.scrollIntoView({ block: 'nearest' }); const L = node.value.length; try { node.setSelectionRange(L, L); } catch { /* */ } }
 		}, 0);
 	}
-	/** Read the caret of the currently-focused input (inside the shadow root) so we
+	/** Read the caret of the currently-focused field (inside the shadow root) so we
 	 *  can put it back after the rebuild instead of slamming it to the end. */
 	private captureCaret(): { start: number; end: number } | null {
-		const a = this.shadow.activeElement as HTMLInputElement | null;
-		if (a && a.tagName === 'INPUT') {
-			try { return { start: a.selectionStart ?? 0, end: a.selectionEnd ?? 0 }; } catch { return null; }
-		}
+		// Reading activeElement can throw if the host was torn out from under a
+		// queued render (HMR replacing the page, or a test wiping the document).
+		// A lost caret is never worth taking the overlay down for.
+		try {
+			const a = this.shadow.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+			if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) {
+				return { start: a.selectionStart ?? 0, end: a.selectionEnd ?? 0 };
+			}
+		} catch { /* fall through */ }
 		return null;
 	}
 	private restoreFocus(caret: { start: number; end: number } | null): void {
-		// Re-focus the tracked input after a re-render. preventScroll keeps the editor
+		// Re-focus the tracked field after a re-render. preventScroll keeps the editor
 		// scroll stable (we just restored it) so popovers anchor against final layout.
 		const deliberate = !!this.wantFocus; // a focusField() move puts the caret at the end
 		let key = this.wantFocus;
-		if (!key && this.state.focus) { const f = this.state.focus; key = this.fk(f.ri, f.di, f.field, f.tok); }
+		// The two tabs own separate focus state: `focus` describes a CSS declaration
+		// cell, `aiFocus` the prompt textarea. Consulting the wrong one would restore
+		// focus into a pane that isn't on screen.
+		if (!key && this.state.aiTab === 'ai') key = this.state.aiFocus;
+		else if (!key && this.state.focus) { const f = this.state.focus; key = this.fk(f.ri, f.di, f.field, f.tok); }
 		if (!key) return;
-		const node = this.rootEl.querySelector('input[data-fkey="' + key + '"]') as HTMLInputElement | null;
+		const node = this.fieldByKey(key);
 		this.wantFocus = null; // clear FIRST — a key that fails to resolve must never pin focus forever
 		if (!node) return;
 		this.focusSilently(node, { preventScroll: true });
@@ -348,20 +782,30 @@ export class Panel {
 		if (!deliberate && caret) { s = Math.min(caret.start, L); e = Math.min(caret.end, L); } // typing → keep the caret
 		try { node.setSelectionRange(s, e); } catch { /* */ }
 	}
-	/** Focus an input WE chose (re-render restore, deliberate move). The flag makes
-	 *  the input's onFocus skip its setState — otherwise a programmatic focus would
+	/** Focus a field WE chose (re-render restore, deliberate move). The flag makes
+	 *  the field's onFocus skip its setState — otherwise a programmatic focus would
 	 *  loop render→focus→onFocus→render and would also reset acIndex (breaking the
 	 *  type-ahead arrow keys). User-initiated focus runs onFocus normally. */
-	private focusSilently(node: HTMLInputElement, opts?: FocusOptions): void {
+	private focusSilently(node: HTMLInputElement | HTMLTextAreaElement, opts?: FocusOptions): void {
 		this.programmaticFocus = true;
 		try { node.focus(opts); } finally { this.programmaticFocus = false; }
 	}
 
 	// ---------- public picking API (driven by the boot module) ----------
-	isPicking(): boolean { return this.state.view === 'pick'; }
+	/** True while a page click should select an element rather than reach the app.
+	 *  `pick` is the full-screen "choose something" mode; beyond that the picker
+	 *  simply stays live while the panel is open, unless suspended. */
+	isPicking(): boolean {
+		if (this.state.view === 'pick') return true;
+		if (!this.state.autoPick) return false;   // classic: arm one pick at a time
+		const open = this.state.view === 'editing' || this.state.view === 'no-style' || this.state.view === 'no-meta';
+		return open && this.state.picking;
+	}
 	open(): void { this.setState({ view: this.state.file ? 'editing' : 'pick', hl: null }); }
 	hover(r: DOMRect, tag: string, file: string | null): void {
-		if (this.state.view !== 'pick') return;
+		// Follows the same gate as the click: if a click would pick, the hover has
+		// to show what it would pick.
+		if (!this.isPicking()) return;
 		this.setState({ hl: { r: toRect(r), tag, file } });
 	}
 	/** Highlight a page element from a DOM-tree row hover. Unlike `hover` (the pick
@@ -373,6 +817,8 @@ export class Panel {
 		this.setState({ hl: { r, tag: tagLabel(elx), file: file ? shortPath(file) : null } });
 	}
 	private clearPreview(): void { if (this.state.hl) this.setState({ hl: null }); }
+	/** Drop a stale highlight the moment picking is suspended. */
+	clearHover(): void { if (this.state.hl) this.setState({ hl: null }); }
 	private onFab(): void {
 		const v = this.state.view;
 		if (v === 'pick') this.setState({ view: this.state.file ? 'editing' : 'closed', hl: null });
@@ -435,10 +881,31 @@ export class Panel {
 		const c = (elx.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean)[0];
 		return c ? '.' + c : elx.tagName.toLowerCase();
 	}
+	/** Drafts are per element, so switching selection parks the prompt rather than
+	 *  discarding it. */
+	private draftKey(file: string | null, meta: PickMeta | null): string {
+		return (file || '') + '|' + (meta ? meta.selectorLabel : '');
+	}
+	private stashDraft(): void {
+		const k = this.draftKey(this.state.file, this.state.meta);
+		if (k !== '|') this.drafts[k] = this.state.prompt;
+	}
+	private loadDraft(file: string | null, meta: PickMeta | null): string {
+		return this.drafts[this.draftKey(file, meta)] || '';
+	}
+
 	async pick(file: string | null, meta: PickMeta | null, el?: Element | null): Promise<void> {
+		// Commit any half-finished CSS edit FIRST. Declaration inputs persist through
+		// a 140ms blur timer, and with the picker always live a click on the next
+		// element re-picks well inside that window — which used to drop the edit.
+		if (this.state.focus && this.state.file) this.save();
+		if (this.state.color) this.closeColorPicker();
+		this.stashDraft(); // park the outgoing element's prompt before we switch
 		this.pickedEl = el || null; // selects this node's tree row + auto-expands its ancestors
 		const treeRev = this.state.treeRev + 1; // the selection moved → rebuild the tree
-		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [], treeRev }); return; }
+		const prompt = this.loadDraft(file, meta);
+		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [], treeRev, prompt }); return; }
+		this.setState({ prompt });
 		// Don't touch file/rules until the load resolves — set them atomically so
 		// the history records one clean baseline (not an old-rules/new-file blip).
 		this.setState({ view: 'editing', hl: null, treeRev, status: { kind: 'saving', text: 'Loading ' + (meta ? meta.fileLabel : file) + ' …' } });
@@ -448,7 +915,7 @@ export class Panel {
 			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); return; }
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
-			this.setState({ file, meta, rules, focusPick: true, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
+			this.setState({ file, meta, rules, focusPick: this.state.focusPick, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
 		}
@@ -477,7 +944,7 @@ export class Panel {
 			if (resp.error || !resp.hasStyle) { this.setState({ status: { kind: 'err', text: resp.error || 'No styles after change' } }); return; }
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
-			this.setState({ rules, focus: null, color: null, menu: null, editBp: null, status: { kind: 'ok', text: okText } });
+			this.setState({ rules, focus: null, color: null, menu: null, editBp: null, editBpText: null, status: { kind: 'ok', text: okText } });
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Reload failed: ' + String(err) } });
 		}
@@ -513,9 +980,9 @@ export class Panel {
 	 *  under it moves), then re-fetch. */
 	private async commitBreakpoint(ri: number, width: number): Promise<void> {
 		const file = this.state.file; const r = this.state.rules[ri];
-		if (!file || !r || typeof r.id !== 'number' || !r.media || !r.media.length) { this.setState({ editBp: null }); return; }
+		if (!file || !r || typeof r.id !== 'number' || !r.media || !r.media.length) { this.setState({ editBp: null, editBpText: null }); return; }
 		const params = r.media[0].params.replace(/([\d.]+)px/, width + 'px');
-		this.setState({ editBp: null, status: { kind: 'saving', text: 'Updating breakpoint …' } });
+		this.setState({ editBp: null, editBpText: null, status: { kind: 'saving', text: 'Updating breakpoint …' } });
 		try {
 			const d = await this.host.applyRules(file, toServerRules(this.state.rules), { mediaRenames: [{ id: r.id, params }] });
 			if (!d.ok) { this.setState({ status: { kind: 'err', text: d.error || 'Failed to update breakpoint' } }); return; }
@@ -604,6 +1071,10 @@ export class Panel {
 
 	// ---------- color picker ----------
 	private openColor(ri: number, di: number, k: number): void {
+		// The seeded flag belongs to whichever declaration the picker was last opened
+		// on. Carrying it to a new target would make closing THIS picker blank a
+		// perfectly good colour somewhere else.
+		this.colorWasSeeded = false;
 		const toks = tokenize(this.curRules()[ri].decls[di].v);
 		const x = toks[k] ? toks[k].x : '#888888';
 		const c = parseColor(x);
@@ -1243,15 +1714,22 @@ export class Panel {
 	}
 	/** Inline editor for a rule's @media min-width (Enter/blur commits, Esc cancels). */
 	private bpInput(ri: number, rule: Rule): SvgEl {
-		const cur = (rule.media![0].params.match(/([\d.]+)px/) || [])[1] || '768';
-		const commit = (e: Event): void => { const v = parseFloat((e.target as HTMLInputElement).value); if (v > 0) void this.commitBreakpoint(ri, v); else this.setState({ editBp: null }); };
+		const source = (rule.media![0].params.match(/([\d.]+)px/) || [])[1] || '768';
+		const cur = this.state.editBpText ?? source;
+		const commit = (e: Event): void => {
+			const v = parseFloat((e.target as HTMLInputElement).value);
+			if (v > 0) void this.commitBreakpoint(ri, v); else this.setState({ editBp: null, editBpText: null });
+		};
 		return el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, alignSelf: 'center' } },
 			el('span', { style: { color: '#8a8a96', fontSize: '10px', fontFamily: '"IBM Plex Mono",monospace' } }, '@media ≥'),
 			el('input', {
 				className: 'sw-in', value: cur, spellCheck: false,
-				ref: (n: HTMLElement) => setTimeout(() => { const i = n as HTMLInputElement; i.focus(); i.select(); }, 0),
+				// Select-on-open only, not on every rebuild: a background re-render
+				// would otherwise re-select the field mid-typing.
+				ref: (n: HTMLElement) => { if (this.state.editBpText != null) return; setTimeout(() => { const i = n as HTMLInputElement; i.focus(); i.select(); }, 0); },
 				style: { width: '5ch', color: '#c4baff', fontFamily: '"IBM Plex Mono",monospace', fontSize: '11px', background: '#101014', border: '1px solid rgba(139,124,246,.4)', borderRadius: 4, padding: '1px 4px' },
-				onKeyDown: (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); } else if (e.key === 'Escape') this.setState({ editBp: null }); },
+				onChange: (e: Event) => this.setState({ editBpText: (e.target as HTMLInputElement).value }),
+				onKeyDown: (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); } else if (e.key === 'Escape') this.setState({ editBp: null, editBpText: null }); },
 				onBlur: (e: Event) => { if (this.rebuilding) return; commit(e); }
 			}),
 			el('span', { style: { color: '#8a8a96', fontSize: '10px', fontFamily: '"IBM Plex Mono",monospace' } }, 'px'));
@@ -1368,39 +1846,283 @@ export class Panel {
 		const f = this.state.float; const x = f.x == null ? (window.innerWidth - sz.floatW - 16) : f.x; const y = f.y == null ? 80 : f.y;
 		return `position:fixed;left:${x}px;top:${y}px;width:${sz.floatW}px;height:${sz.floatH}px;`;
 	}
-	private dkStyle(active: boolean): Record<string, string | number> {
-		return { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 23, height: 21, border: 0, borderRadius: 5, cursor: 'pointer', background: active ? 'rgba(139,124,246,.2)' : 'transparent', color: active ? '#c4baff' : '#7e7e8c' };
-	}
 	private buildHeader(): SvgEl {
 		const dock = this.state.dock;
-		const dockBtn = (which: Dock, title: string, ...kids: SvgEl[]): SvgEl =>
-			el('button', { title, onClick: () => this.setState({ dock: which }), style: this.dkStyle(dock === which) }, ic(15, '0 0 16 16', { fill: 'none' }, ...kids));
 		return el('div', { onMouseDown: (e: MouseEvent) => this.onHeaderDown(e), style: `display:flex;align-items:center;gap:9px;padding:10px 11px 10px 13px;background:#1c1c22;border-bottom:1px solid rgba(255,255,255,.07);flex:none;${dock === 'float' ? 'cursor:grab;' : ''}` },
 			el('span', { style: 'width:8px;height:8px;border-radius:2px;background:linear-gradient(135deg,#8b7cf6,#6d5efc);flex:none;box-shadow:0 0 10px rgba(139,124,246,.6);' }),
-			el('span', { style: 'font-size:12.5px;font-weight:600;letter-spacing:.01em;' }, 'Stylewright'),
-			el('span', { style: 'flex:1;' }),
-			el('button', { className: 'sw-iconbtn', title: 'Pick another element', onClick: () => this.setState({ view: 'pick', hl: null }), style: 'display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;background:transparent;color:#9a9aa6;border-radius:6px;cursor:pointer;' },
+			// The wordmark earns its place again now the four dock buttons have moved
+			// into Settings. It still yields first if the panel is narrow — the tabs
+			// are a control, the wordmark is decoration.
+			el('span', { style: 'font-size:12.5px;font-weight:600;letter-spacing:.01em;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' }, 'Stylewright'),
+			this.aiEnabled() ? this.buildTabs() : null,
+			el('span', { style: 'flex:1;min-width:4px;' }),
+			// The picker is live by default, so this is a suspend switch rather than
+			// an arm switch — the only way to click your own app's buttons while the
+			// panel is open, since a pick swallows the click.
+			el('button', {
+				className: 'sw-iconbtn',
+				title: !this.state.autoPick
+					? 'Pick another element'
+					: this.state.picking
+						? 'Picking is on — click any element to target it. Click here to use the page instead.'
+						: 'Picking is paused — click here to target elements again.',
+				'aria-pressed': this.state.picking ? 'true' : 'false',
+				onClick: () => this.state.autoPick
+					? this.setState({ picking: !this.state.picking, hl: null })
+					: this.setState({ view: 'pick', hl: null }),
+				style: `display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;border-radius:6px;cursor:pointer;background:${this.state.autoPick && this.state.picking ? 'rgba(139,124,246,.2)' : 'transparent'};color:${this.state.autoPick && this.state.picking ? '#c4baff' : '#9a9aa6'};`
+			},
 				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M12 2v3M12 19v3M2 12h3M19 12h3'), el('circle', { cx: 12, cy: 12, r: 4 }))),
-			el('button', { className: 'sw-iconbtn', title: this.state.showHtml ? 'Hide DOM tree' : 'Show DOM tree', onClick: () => this.bumpTree({ showHtml: !this.state.showHtml }), style: `display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;border-radius:6px;cursor:pointer;background:${this.state.showHtml ? 'rgba(139,124,246,.2)' : 'transparent'};color:${this.state.showHtml ? '#c4baff' : '#9a9aa6'};` },
-				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3'))),
-			el('div', { style: 'display:flex;align-items:center;gap:2px;background:#101014;border:1px solid rgba(255,255,255,.07);border-radius:7px;padding:2px;' },
-				dockBtn('left', 'Dock left', el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 3.6, width: 4, height: 8.8, rx: 1, fill: 'currentColor' })),
-				dockBtn('bottom', 'Dock bottom', el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 9, width: 10.8, height: 3.4, rx: 1, fill: 'currentColor' })),
-				dockBtn('right', 'Dock right', el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 9.4, y: 3.6, width: 4, height: 8.8, rx: 1, fill: 'currentColor' })),
-				dockBtn('float', 'Float', el('rect', { x: 2, y: 4, width: 9, height: 7, rx: 1.3, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 6, y: 6.5, width: 8, height: 6.5, rx: 1.3, fill: '#16161b', stroke: 'currentColor', strokeWidth: 1.3 }))),
+			// Settings is the third body tab, not a popover. It gets an icon rather
+			// than a word because the header is 300px wide at its narrowest and
+			// "CSS | AI | Settings" does not fit — but it behaves exactly like the
+			// other two: it swaps the body and it has a breadcrumb.
+			el('button', {
+				className: 'sw-iconbtn', title: AI_COPY.settings.title.toLowerCase(), 'aria-label': 'Settings',
+				'aria-pressed': this.state.aiTab === 'settings' ? 'true' : 'false',
+				onClick: () => this.switchTab(this.state.aiTab === 'settings' ? this.lastBodyTab : 'settings'),
+				style: `display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;border-radius:6px;cursor:pointer;background:${this.state.aiTab === 'settings' ? 'rgba(139,124,246,.2)' : 'transparent'};color:${this.state.aiTab === 'settings' ? '#c4baff' : '#9a9aa6'};`
+			},
+				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+					el('circle', { cx: 12, cy: 12, r: 3 }),
+					pth('M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'))),
 			el('button', { className: 'sw-iconbtn', title: 'Close', onClick: () => this.setState({ view: 'closed' }), style: 'display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:0;background:transparent;color:#9a9aa6;border-radius:6px;cursor:pointer;' },
 				ic(15, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round' }, pth('M5 5l14 14M19 5L5 19'))));
 	}
+	/**
+	 * Settings. Deliberately data-driven: adding one later is a row in this array,
+	 * not another bespoke control wedged into a 300px-wide header.
+	 */
+	private settingRows(): { key: string; label: string; hint: string; on: boolean; toggle: () => void }[] {
+		return [
+			{
+				key: 'autoPick',
+				label: AI_COPY.settings.autoPick,
+				hint: AI_COPY.settings.autoPickHint,
+				on: this.state.autoPick,
+				// Turning it on should also un-pause it, or the setting would look
+				// like it did nothing.
+				toggle: () => this.setState({ autoPick: !this.state.autoPick, picking: !this.state.autoPick, hl: null })
+			},
+			{
+				key: 'showHtml',
+				label: AI_COPY.settings.domTree,
+				hint: AI_COPY.settings.domTreeHint,
+				on: this.state.showHtml,
+				toggle: () => this.bumpTree({ showHtml: !this.state.showHtml })
+			},
+			{
+				key: 'focusPick',
+				label: AI_COPY.settings.focusPick,
+				hint: AI_COPY.settings.focusPickHint,
+				on: this.state.focusPick,
+				toggle: () => this.setState({ focusPick: !this.state.focusPick })
+			}
+		];
+	}
+
+	/** The dock is a single choice, not a switch — four icon buttons in a row. */
+	private buildLayoutChoice(): SvgEl {
+		const cur = this.state.dock;
+		const opt = (which: Dock, label: string, ...kids: SvgEl[]): SvgEl => el('button', {
+			title: label, 'aria-label': label, 'aria-pressed': cur === which ? 'true' : 'false',
+			onClick: () => this.setState({ dock: which }),
+			style: `flex:1;display:flex;align-items:center;justify-content:center;gap:5px;border:0;border-radius:5px;cursor:pointer;padding:5px 0;font-family:"IBM Plex Sans",sans-serif;font-size:10.5px;background:${cur === which ? 'rgba(139,124,246,.22)' : 'transparent'};color:${cur === which ? '#c4baff' : '#8a8a96'};`
+		}, ic(14, '0 0 16 16', { fill: 'none' }, ...kids));
+		return el('div', { style: 'padding:9px 12px;' },
+			el('span', { style: 'display:block;font-size:12.5px;color:#ececf1;' }, AI_COPY.settings.layout),
+			el('span', { style: 'display:block;font-size:11px;line-height:1.45;color:#6a6a78;margin-top:2px;' }, AI_COPY.settings.layoutHint),
+			el('div', { style: 'display:flex;gap:2px;margin-top:7px;background:#101014;border:1px solid rgba(255,255,255,.07);border-radius:7px;padding:2px;' },
+				opt('left', AI_COPY.settings.dockLeft, el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 3.6, width: 4, height: 8.8, rx: 1, fill: 'currentColor' })),
+				opt('bottom', AI_COPY.settings.dockBottom, el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 2.6, y: 9, width: 10.8, height: 3.4, rx: 1, fill: 'currentColor' })),
+				opt('right', AI_COPY.settings.dockRight, el('rect', { x: 2, y: 3, width: 12, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 9.4, y: 3.6, width: 4, height: 8.8, rx: 1, fill: 'currentColor' })),
+				opt('float', AI_COPY.settings.dockFloat, el('rect', { x: 2, y: 4, width: 9, height: 7, rx: 1.3, stroke: 'currentColor', strokeWidth: 1.3 }), el('rect', { x: 6, y: 6.5, width: 8, height: 6.5, rx: 1.3, fill: '#16161b', stroke: 'currentColor', strokeWidth: 1.3 }))));
+	}
+
+	/**
+	 * The tools you use. This does NOT gate what can connect — any MCP client that
+	 * speaks the protocol registers itself — it decides whose setup steps are worth
+	 * keeping in front of you. A tool you have switched off stays listed (so it is
+	 * reversible) but goes quiet: dimmed, and without a Setup button.
+	 */
+	private buildVendorList(): SvgEl {
+		const on = this.state.vendorsOn;
+		const row = (v: AgentVendor): SvgEl => {
+			const enabled = on.includes(v.id);
+			return el('div', { style: `display:flex;align-items:center;gap:8px;padding:4px 13px;opacity:${enabled ? 1 : 0.5};` },
+				el('button', {
+					role: 'switch', 'aria-checked': enabled ? 'true' : 'false', 'aria-label': v.label,
+					// Switching off the last one would leave the setup screen blank, so
+					// the final vendor is sticky rather than disabled — a dead control
+					// you cannot explain is worse than one that declines once.
+					onClick: () => this.setState({
+						vendorsOn: enabled
+							? (on.length > 1 ? on.filter((x) => x !== v.id) : on)
+							: [...on, v.id]
+					}),
+					style: 'display:flex;align-items:center;gap:10px;flex:1;min-width:0;border:0;background:transparent;padding:0;cursor:pointer;text-align:left;'
+				},
+					el('span', { style: `width:26px;height:15px;border-radius:8px;flex:none;position:relative;transition:background .12s;background:${enabled ? '#6d5efc' : 'rgba(255,255,255,.14)'};` },
+						el('span', { style: `position:absolute;top:2px;left:${enabled ? 13 : 2}px;width:11px;height:11px;border-radius:50%;background:#fff;transition:left .12s;` })),
+					el('span', { style: 'font-size:12.5px;color:#ececf1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' }, v.label)),
+				// Drills in rather than opening a takeover: Settings is a pane now, and
+				// a vendor's steps are a level inside it.
+				enabled ? el('button', {
+					onClick: () => this.setState({ aiTool: v.id, settingsVendor: v.id }),
+					style: 'flex:none;border:1px solid rgba(255,255,255,.14);background:transparent;color:#c9c6d6;font-family:"IBM Plex Sans",sans-serif;font-size:10.5px;padding:2px 7px;border-radius:5px;cursor:pointer;'
+				}, AI_COPY.settings.setupFor) : null);
+		};
+		const boundId = this.state.ai?.boundId || null;
+		const live = this.aiSessions().filter((x) => x.state !== 'gone');
+		const sub = (t: string): SvgEl => el('span', { style: 'display:block;font-family:"IBM Plex Sans",sans-serif;font-size:9px;font-weight:700;letter-spacing:.13em;color:#5c5c66;padding:0 13px;margin:12px 0 6px;' }, t);
+		return el('div', { style: 'padding:4px 0 8px;' },
+			el('span', { style: 'display:block;font-size:12.5px;color:#ececf1;padding:0 13px;' }, AI_COPY.settings.agents),
+			el('span', { style: 'display:block;font-size:11px;line-height:1.45;color:#6a6a78;margin-top:2px;padding:0 13px;' }, AI_COPY.settings.agentsHint),
+
+			// What is connected RIGHT NOW, above the list of what could be. This is
+			// the same component the destination dropdown uses — one session row,
+			// one Link button, one definition of "watching".
+			sub(AI_COPY.settings.sessions),
+			live.length
+				? el('div', { style: 'display:flex;flex-direction:column;gap:6px;padding:0 13px;' },
+					live.map((x) => this.sessionRow(x, x.id === boundId)))
+				: el('div', { style: 'padding:0 13px;font-size:11.5px;line-height:1.5;color:#6a6a78;' }, AI_COPY.pop.none),
+			el('div', { style: 'display:flex;align-items:center;gap:9px;padding:8px 13px 0;flex-wrap:wrap;' },
+				this.refreshButton(false),
+				el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:#6a6a78;' }, this.state.aiCheckNote)),
+			el('div', { style: 'font-size:11px;line-height:1.45;color:#6a6a78;padding:9px 13px 0;' }, AI_COPY.empty.oneEntry),
+
+			sub(AI_COPY.settings.installed),
+			VENDORS.map(row));
+	}
+
+	/**
+	 * Settings, as a body pane rather than a popover.
+	 *
+	 * It was a floating 262px card anchored to the gear, which meant it could be
+	 * clipped, could not scroll without swallowing the panel underneath it, and
+	 * had nowhere to put a second level. As a pane it gets the full body, the
+	 * body's scroller, and a breadcrumb — so "set up Claude Code" is a place you
+	 * navigate to and back out of, not a popover inside a popover.
+	 */
+	private buildSettingsBody(): SvgEl {
+		const vendor = this.state.settingsVendor ? vendorById(this.state.settingsVendor) : null;
+		const crumbs: { label: string; mono?: boolean; onClick?: () => void }[] = [
+			{ label: AI_COPY.settings.crumb, mono: false, onClick: vendor ? () => this.setState({ settingsVendor: null }) : undefined }
+		];
+		if (vendor) crumbs.push({ label: vendor.label, mono: false });
+		const bar = this.buildCrumbBar(crumbs,
+			ic(13, '0 0 24 24', { fill: 'none', stroke: C_SEL, strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+				el('circle', { cx: 12, cy: 12, r: 3 }),
+				pth('M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z')),
+			null);
+		return el('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0;' },
+			bar,
+			el('div', { className: 'sw-scroll', style: 'flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;background:#16161b;' },
+				vendor ? this.buildVendorSetup(vendor) : this.buildSettingsList()));
+	}
+
+	private buildSettingsList(): SvgEl {
+		const row = (r: { label: string; hint: string; on: boolean; toggle: () => void }): SvgEl => el('button', {
+			onClick: r.toggle,
+			role: 'switch', 'aria-checked': r.on ? 'true' : 'false',
+			style: 'display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;border:0;background:transparent;padding:9px 13px;cursor:pointer;'
+		},
+			// A track-and-knob switch rather than a checkbox: these take effect
+			// immediately, and a checkbox implies a form you still have to submit.
+			el('span', { style: `width:26px;height:15px;border-radius:8px;flex:none;margin-top:1px;position:relative;transition:background .12s;background:${r.on ? '#6d5efc' : 'rgba(255,255,255,.14)'};` },
+				el('span', { style: `position:absolute;top:2px;left:${r.on ? 13 : 2}px;width:11px;height:11px;border-radius:50%;background:#fff;transition:left .12s;` })),
+			el('span', { style: 'flex:1;min-width:0;' },
+				el('span', { style: 'display:block;font-size:12.5px;color:#ececf1;' }, r.label),
+				el('span', { style: 'display:block;font-size:11px;line-height:1.45;color:#6a6a78;margin-top:2px;' }, r.hint)));
+		const rule = (): SvgEl => el('div', { style: 'height:1px;background:rgba(255,255,255,.07);margin:6px 0;' });
+		return el('div', { style: 'padding:4px 0 14px;' },
+			this.buildLayoutChoice(),
+			rule(),
+			el('div', { style: 'display:flex;flex-direction:column;' }, this.settingRows().map(row)),
+			this.aiEnabled() ? rule() : null,
+			this.aiEnabled() ? this.buildVendorList() : null);
+	}
+
+	/**
+	 * The four numbered steps for one vendor. Shared, because the connect-an-agent
+	 * screen and Settings → Agents → Setup are the same instructions reached two
+	 * ways, and a second copy is a second thing to forget to update.
+	 */
+	private buildSetupSteps(vendor: AgentVendor): SvgEl {
+		const steps = [
+			vendor.register.cli ? AI_COPY.empty.step1 : fill(AI_COPY.empty.step1Json, { tool: vendor.label }),
+			fill(AI_COPY.empty.step2, { tool: vendor.label }),
+			AI_COPY.empty.step3,
+			AI_COPY.empty.step4
+		];
+		return el('div', null,
+			el('div', { style: 'display:flex;flex-direction:column;gap:11px;' },
+				steps.map((t, i) => el('div', { style: 'display:flex;align-items:flex-start;gap:9px;' },
+					el('span', { style: 'width:19px;height:19px;border-radius:50%;background:#101014;border:1px solid rgba(255,255,255,.13);color:#bcb0ff;font-family:"IBM Plex Mono",monospace;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none;margin-top:1px;' }, String(i + 1)),
+					el('div', { style: 'flex:1;min-width:0;' },
+						el('div', { style: 'font-size:12.5px;line-height:1.45;color:#d6d3e0;' }, t),
+						// The command belongs ON this screen, not behind a disclosure —
+						// this is the step people get stuck on.
+						i === 0 ? this.setupCommandBlock(vendor) : null,
+						i === 2 ? el('div', { style: 'font-size:11px;line-height:1.45;color:#6a6a78;margin-top:3px;' }, AI_COPY.empty.step3Why) : null)))),
+			// The thing nobody guesses, and the reason someone opens this screen a
+			// second time: the entry is not per-project.
+			el('div', { style: 'font-size:11px;line-height:1.45;color:#6a6a78;padding-top:12px;' }, AI_COPY.empty.oneEntry));
+	}
+
+	/** One vendor's setup steps, reached from Settings → Agents → Setup. */
+	private buildVendorSetup(vendor: AgentVendor): SvgEl {
+		const live = this.aiSessions().filter((x) => x.state !== 'gone');
+		return el('div', { style: 'padding:13px;' },
+			this.buildSetupSteps(vendor),
+			// Step 4 says "click Refresh", so Refresh has to be on this screen —
+			// pointing at a control that lives one level up is an instruction that
+			// does not survive being followed literally.
+			el('div', { style: 'display:flex;align-items:center;gap:9px;padding-top:12px;flex-wrap:wrap;' },
+				this.refreshButton(true),
+				el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:#6a6a78;' }, this.state.aiCheckNote)),
+			live.length
+				? el('div', { style: 'display:flex;flex-direction:column;gap:6px;padding-top:11px;' },
+					live.map((x) => this.sessionRow(x, x.id === (this.state.ai?.boundId || null))))
+				: null);
+	}
+
+	/**
+	 * The bar under the header. One component for every tab, because it answers
+	 * the same question in each: where am I, and what is one level up.
+	 *
+	 * A crumb with an `onClick` is a link back; the last one never is.
+	 */
+	private buildCrumbBar(crumbs: { label: string; mono?: boolean; color?: string; onClick?: () => void }[], lead: SvgEl | null, trail?: SvgEl | null): SvgEl {
+		const sep = (): SvgEl => ic(11, '0 0 24 24', { fill: 'none', stroke: C_PUNCT, strokeWidth: 2.5, strokeLinecap: 'round' }, pth('M9 6l6 6-6 6'));
+		const parts: (SvgEl | null)[] = [];
+		crumbs.forEach((c, i) => {
+			if (i) parts.push(sep());
+			const style = {
+				fontFamily: c.mono === false ? '"IBM Plex Sans",sans-serif' : '"IBM Plex Mono",monospace',
+				fontSize: 12, color: c.color || C_SEL, whiteSpace: 'nowrap',
+				overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0
+			};
+			parts.push(c.onClick
+				? el('button', {
+					onClick: c.onClick,
+					style: { ...style, border: 0, background: 'transparent', padding: 0, cursor: 'pointer', textDecoration: 'underline', textDecorationColor: 'rgba(255,255,255,.2)', textUnderlineOffset: '2px' }
+				}, c.label)
+				: el('span', { style }, c.label));
+		});
+		return el('div', { style: 'display:flex;align-items:center;gap:8px;padding:9px 13px;background:#15151a;border-bottom:1px solid rgba(255,255,255,.06);flex:none;flex-wrap:wrap;' },
+			lead, parts, el('span', { style: 'flex:1;' }), trail ?? null);
+	}
+
 	private buildBreadcrumb(): SvgEl {
 		const m = this.state.meta;
-		return el('div', { style: 'display:flex;align-items:center;gap:8px;padding:9px 13px;background:#15151a;border-bottom:1px solid rgba(255,255,255,.06);flex:none;flex-wrap:wrap;' },
+		return this.buildCrumbBar(
+			[{ label: m ? m.fileLabel : '—' }, { label: m ? m.selectorLabel : '', color: '#9d8cf8' }],
 			ic(13, '0 0 24 24', { fill: C_SEL }, pth('M12 2 2 7l10 5 10-5-10-5Z', { opacity: 0.9 }), pth('M2 12l10 5 10-5M2 17l10 5 10-5', { stroke: C_SEL, strokeWidth: 1.6, fill: 'none', opacity: 0.55 })),
-			el('span', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: 12, color: C_SEL } }, m ? m.fileLabel : '—'),
-			ic(11, '0 0 24 24', { fill: 'none', stroke: C_PUNCT, strokeWidth: 2.5, strokeLinecap: 'round' }, pth('M9 6l6 6-6 6')),
-			el('span', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: 12, color: '#9d8cf8' } }, m ? m.selectorLabel : ''),
-			el('span', { style: 'flex:1;' }),
 			el('span', { style: { fontFamily: '"IBM Plex Mono",monospace', fontSize: 10.5, color: '#6a6a78', background: '#101014', border: '1px solid rgba(255,255,255,.06)', padding: '2px 7px', borderRadius: 5 } }, m ? m.dims : ''));
 	}
+
 	private buildStatusBar(): SvgEl {
 		const st = this.state.status;
 		const color = ({ idle: '#9a9aa6', saving: '#c4baff', ok: '#34d399', err: '#f87171' } as Record<StatusKind, string>)[st.kind];
@@ -1439,10 +2161,687 @@ export class Panel {
 	}
 	private buildPanel(): SvgEl {
 		const v = this.state.view;
-		const cssPane = v === 'no-meta' ? this.buildNoMeta() : v === 'no-style' ? this.buildNoStyle() : this.buildEditBody();
+		const ai = this.aiEnabled();
+		// `no-meta` outranks the tab: an element with no source metadata cannot be
+		// sent to an agent any more than it can be styled, and it is the same
+		// failure with the same explanation.
+		const showSettings = this.state.aiTab === 'settings';
+		const showAi = ai && this.state.aiTab === 'ai' && v !== 'no-meta';
+		// Build ONLY the pane on screen. The CSS pane is the expensive one — a full
+		// tokenized rebuild plus a document-wide querySelectorAll for DOM ordering —
+		// and building it eagerly would run all of that on every prompt keystroke.
+		const body = showSettings
+			? this.buildSettingsBody()
+			: showAi
+				? this.buildAiBody()
+				: this.buildBody(v === 'no-meta' ? this.buildNoMeta() : v === 'no-style' ? this.buildNoStyle() : this.buildEditBody());
 		const inner = el('div', { className: 'sw-scroll', style: 'display:flex;flex-direction:column;height:100%;background:#16161b;border:1px solid rgba(255,255,255,.1);border-radius:13px;overflow:hidden;box-shadow:0 24px 70px -20px rgba(0,0,0,.7),0 0 0 1px rgba(0,0,0,.4);color:#ececf1;' },
-			this.buildHeader(), this.buildBody(cssPane));
+			this.buildHeader(),
+			body,
+		);
 		return el('div', { style: this.panelStyle() }, this.buildResizeHandles(), inner);
+	}
+
+	// =====================================================================
+	// AI path
+	// =====================================================================
+
+	private aiSessions(): SwAiSession[] { return this.state.ai?.sessions || []; }
+	private boundSession(): SwAiSession | null {
+		const s = this.state.ai;
+		if (!s || !s.boundId) return null;
+		return s.sessions.find((x) => x.id === s.boundId) || null;
+	}
+	private aiOffline(): boolean {
+		const b = this.boundSession();
+		return !!this.state.ai?.boundId && (!b || b.state === 'gone');
+	}
+	private destName(): string {
+		const b = this.boundSession();
+		return b ? b.name : '';
+	}
+	private aiStatus(): SwAiState['current'] | undefined { return this.state.ai?.current; }
+
+	private buildTabs(): SvgEl {
+		const tab = this.state.aiTab;
+		const mk = (which: 'styles' | 'ai', label: string): SvgEl => el('button', {
+			onClick: () => this.switchTab(which),
+			'aria-pressed': tab === which ? 'true' : 'false',
+			style: {
+				border: 0, fontFamily: '"IBM Plex Sans",sans-serif', fontSize: 11,
+				fontWeight: tab === which ? 600 : 500, padding: '3px 9px', borderRadius: 5, cursor: 'pointer',
+				background: tab === which ? '#2f2f3a' : 'transparent', color: tab === which ? '#ececf1' : '#8a8a96',
+				whiteSpace: 'nowrap'
+			}
+		}, label);
+		return el('div', { style: 'display:flex;align-items:center;gap:2px;background:#101014;border:1px solid rgba(255,255,255,.07);border-radius:6px;padding:2px;flex:none;' },
+			mk('styles', AI_COPY.tabs.styles), mk('ai', AI_COPY.tabs.ai));
+	}
+
+	private switchTab(which: BodyTab): void {
+		if (this.state.aiTab === which) return;
+		// Leaving the CSS pane must never be the way an edit gets lost. A value is
+		// normally committed by its input's blur timer, which checks `state.focus` —
+		// and the reset below would make it skip the save.
+		if (this.state.aiTab === 'styles') {
+			if (this.state.focus) this.save();
+			// Same for a seeded-but-untouched colour: the picker's cleanup only runs
+			// through closeColorPicker(), so dropping `color` here would strand the
+			// placeholder in the source and let the flag blank an unrelated
+			// declaration the next time a picker closes.
+			if (this.state.color) this.closeColorPicker();
+		}
+		if (which !== 'settings') this.lastBodyTab = which;
+		// Leaving a tab drops that tab's focus so restoreFocus can't chase a field
+		// that is no longer in the tree.
+		this.setState({
+			aiTab: which, focus: null, color: null, menu: null, aiFocus: null,
+			aiPop: null, vendorMenu: false,
+			// Entering Settings always lands on the list, never on whichever vendor
+			// was open the last time.
+			settingsVendor: which === 'settings' ? null : this.state.settingsVendor
+		});
+		if (which === 'ai' && this.state.file && !this.aiStatus()) this.focusPrompt();
+	}
+
+	private focusPrompt(): void {
+		this.setState({ aiFocus: AI_PROMPT_KEY });
+		this.focusField(AI_PROMPT_KEY);
+	}
+
+	private toggleBindingSurface(): void {
+		if (this.state.aiPop) { this.setState({ aiPop: null }); return; }
+		this.setState({ aiPop: 'list', aiCheckNote: '' });
+	}
+
+	/** One implementation, two presentations. The empty checklist becomes a body
+	 *  takeover when a blocked Send opened it; the list is always a popover. */
+	private popShell(children: (SvgEl | null)[], width: number, key: string): SvgEl {
+		// Anchored and viewport-flipping: the trigger is at the BOTTOM of the panel
+		// now, so a fixed top offset would open it off the bottom of the screen.
+		return el('div', {
+			className: 'sw-pop sw-scroll', ref: this.popoverRef(),
+			style: {
+				position: 'fixed', top: 0, left: 0, width, maxHeight: 'calc(100vh - 40px)',
+				background: '#1c1c22', border: '1px solid rgba(255,255,255,.13)', borderRadius: 11,
+				boxShadow: '0 20px 56px -14px rgba(0,0,0,.8)', zIndex: 70, overflowY: 'auto',
+				animation: this.popAnim(key)
+			}
+		}, children);
+	}
+
+	private popHeader(title: string): SvgEl {
+		return el('div', { style: 'display:flex;align-items:center;gap:8px;padding:10px 11px 8px 13px;' },
+			el('span', { style: 'font-family:"IBM Plex Sans",sans-serif;font-size:9px;font-weight:700;letter-spacing:.13em;color:#5c5c66;flex:1;' }, title),
+			el('button', {
+				className: 'sw-iconbtn', title: AI_COPY.pop.close, 'aria-label': AI_COPY.pop.close,
+				onClick: () => this.setState({ aiPop: null }),
+				style: 'display:flex;align-items:center;justify-content:center;width:20px;height:20px;border:0;background:transparent;color:#7e7e8c;border-radius:5px;cursor:pointer;flex:none;'
+			}, ic(11, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round' }, pth('M5 5l14 14M19 5L5 19'))));
+	}
+
+	/**
+	 * The destination dropdown: which session this prompt goes to.
+	 *
+	 * It lists sessions and nothing else. It used to swap itself for the whole
+	 * setup checklist when the list was empty, which meant a second floating panel
+	 * carrying a copy of a screen that also lives in Settings — so "how do I
+	 * connect an agent" had two answers that had to be kept in sync. Now there is
+	 * one, and this links to it.
+	 */
+	private buildSessionList(): SvgEl {
+		const boundId = this.state.ai?.boundId || null;
+		const live = this.aiSessions().filter((s) => s.state !== 'gone');
+		return this.popShell([
+			this.popHeader(AI_COPY.pop.title),
+			live.length
+				? el('div', { style: 'display:flex;flex-direction:column;gap:6px;padding:0 11px 10px;' },
+					live.map((s) => this.sessionRow(s, s.id === boundId)))
+				: el('div', { style: 'padding:0 13px 11px;font-size:12px;line-height:1.5;color:#9a9aa6;' }, AI_COPY.pop.none),
+			el('div', { style: 'display:flex;align-items:center;gap:8px;padding:9px 11px;background:#191920;border-top:1px solid rgba(255,255,255,.07);flex-wrap:wrap;' },
+				this.refreshButton(false),
+				el('button', {
+					onClick: () => { this.setState({ aiPop: null, aiCheckNote: '' }); this.switchTab('settings'); },
+					style: 'border:1px solid rgba(255,255,255,.14);background:transparent;color:#d6d3e0;font-family:"IBM Plex Sans",sans-serif;font-size:11px;padding:4px 9px;border-radius:6px;cursor:pointer;flex:none;'
+				}, AI_COPY.pop.setup),
+				el('span', { style: 'flex:1;' }),
+				boundId ? el('button', {
+					onClick: () => void this.unlinkSession(),
+					style: 'border:0;background:transparent;color:#9a9aa6;font-family:"IBM Plex Sans",sans-serif;font-size:11px;padding:4px 8px;border-radius:6px;cursor:pointer;flex:none;'
+				}, AI_COPY.pop.clear) : null),
+			this.state.aiCheckNote
+				? el('div', { style: 'padding:0 13px 10px;font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:#6a6a78;' }, this.state.aiCheckNote)
+				: null
+		], 290, 'ai:list');
+	}
+
+	private sessionRow(s: SwAiSession, bound: boolean): SvgEl {
+		const watching = s.state === 'watching';
+		const dot = watching
+			? { background: '#34d399', boxShadow: '0 0 6px rgba(52,211,153,.6)' }
+			: { background: 'transparent', border: '1.5px solid #5c8b78' };
+		return el('div', {
+			style: {
+				display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 8,
+				background: bound ? 'rgba(52,211,153,.07)' : '#16161b',
+				border: `1px solid ${bound ? 'rgba(52,211,153,.28)' : 'rgba(255,255,255,.06)'}`
+			}
+		},
+			el('span', { style: { width: 7, height: 7, borderRadius: '50%', flex: 'none', ...dot } }),
+			el('div', { style: 'flex:1;min-width:0;' },
+				el('div', { style: 'display:flex;align-items:center;gap:6px;' },
+					el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:12px;color:#ececf1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, s.name),
+					el('span', { style: 'font-family:"IBM Plex Sans",sans-serif;font-size:9px;font-weight:600;letter-spacing:.08em;color:#8a8a96;text-transform:uppercase;flex:none;' }, s.tool),
+					s.sameProject ? null : el('span', { title: s.cwd, style: 'font-size:9px;font-weight:600;letter-spacing:.06em;color:#e3d6b6;background:rgba(232,201,138,.12);border:1px solid rgba(232,201,138,.28);border-radius:4px;padding:0 4px;flex:none;' }, AI_COPY.pop.otherProject)),
+				// Cline spawns MCP servers at "/", so its cwd identifies nothing —
+				// printing it is noise dressed up as detail. Show it only when it
+				// actually locates the session.
+				el('div', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#6a6a78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' },
+					(usefulCwd(s.cwd) ? tildePath(s.cwd) + ' · ' : '') + (watching ? AI_COPY.pop.watching : AI_COPY.pop.notWatching))),
+			bound
+				? el('span', { style: 'flex:none;border:1px solid rgba(52,211,153,.4);color:#8fe8c0;font-family:"IBM Plex Sans",sans-serif;font-size:11px;font-weight:600;padding:3px 9px;border-radius:6px;' }, AI_COPY.pop.linked)
+				: el('button', {
+					onClick: () => void this.linkSession(s.id),
+					style: 'flex:none;border:0;background:#6d5efc;color:#fff;font-family:"IBM Plex Sans",sans-serif;font-size:11px;font-weight:600;padding:4px 10px;border-radius:6px;cursor:pointer;'
+				}, AI_COPY.pop.link));
+	}
+
+	private refreshButton(primary: boolean): SvgEl {
+		const spin = this.state.aiRefreshing;
+		return el('button', {
+			onClick: () => void this.refreshSessions(),
+			disabled: spin,
+			style: primary
+				? 'display:inline-flex;align-items:center;gap:6px;border:0;background:#6d5efc;color:#fff;font-family:"IBM Plex Sans",sans-serif;font-size:12px;font-weight:600;padding:7px 13px;border-radius:8px;cursor:pointer;flex:none;box-shadow:0 6px 18px -8px rgba(109,94,252,.9);'
+				: 'display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.14);background:transparent;color:#d6d3e0;font-family:"IBM Plex Sans",sans-serif;font-size:11px;padding:4px 9px;border-radius:6px;cursor:pointer;flex:none;'
+		},
+			ic(12, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { flex: 'none', animation: spin ? 'sw-spin .8s linear infinite' : 'none' } },
+				pth('M20 11a8 8 0 1 0-2.3 5.7'), pth('M20 4v7h-7')),
+			AI_COPY.pop.refresh);
+	}
+
+	/**
+	 * Copy-to-clipboard for a command block. Confirmation is written straight onto
+	 * the live button rather than through state: a re-render would tear the
+	 * feedback down mid-flash, and a state field for a 1.2s label would put a
+	 * timer in the render path for no benefit.
+	 */
+	private copyButton(text: string): SvgEl {
+		const idle = 'rgba(255,255,255,.06)';
+		const btn = el('button', {
+			title: AI_COPY.empty.copy, 'aria-label': AI_COPY.empty.copy,
+			onClick: (e: MouseEvent) => {
+				const b = e.currentTarget as HTMLElement;
+				void copyText(text).then((ok) => {
+					clear(b);
+					b.appendChild(document.createTextNode(ok ? AI_COPY.empty.copied : AI_COPY.empty.copyFailed));
+					b.style.width = 'auto';
+					b.style.padding = '0 6px';
+					b.style.color = ok ? '#8fe8c0' : '#e3d6b6';
+					b.style.background = ok ? 'rgba(52,211,153,.12)' : 'rgba(232,201,138,.12)';
+					setTimeout(() => {
+						// The panel may have re-rendered this button away by now.
+						if (!b.isConnected) return;
+						clear(b);
+						b.appendChild(copyGlyph());
+						b.style.width = '20px';
+						b.style.padding = '0';
+						b.style.color = '#8a8a96';
+						b.style.background = idle;
+					}, 1200);
+				});
+			},
+			style: {
+				position: 'absolute', top: 5, right: 5, height: 20, width: 20,
+				display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+				border: '1px solid rgba(255,255,255,.1)', borderRadius: 5, background: idle,
+				color: '#8a8a96', cursor: 'pointer', padding: 0,
+				fontFamily: '"IBM Plex Sans",sans-serif', fontSize: 10, fontWeight: 600, lineHeight: '18px'
+			}
+		}, copyGlyph());
+		return btn;
+	}
+
+	/**
+	 * Which agent's instructions to show. Claude Code registers an MCP server with
+	 * a CLI command; Cline and OpenCode have no equivalent — they are configured
+	 * through a JSON file. One "step 1" cannot serve all three, and showing a
+	 * `claude` command to a Cline user is simply the wrong instruction.
+	 *
+	 * The vendor the setup screen is describing. Falls back when the selected one
+	 * has been switched off in Settings.
+	 */
+	/**
+	 * Step 1's payload, per tool, rendered entirely from the vendor table. The
+	 * command itself is computed by the dev server from where this install
+	 * actually lives — printing the published `npx …` name at someone running from
+	 * a checkout hands them a 404 at the exact moment they are already stuck,
+	 * which is indistinguishable from "this tool is broken".
+	 */
+	private setupCommandBlock(vendor: AgentVendor): SvgEl {
+		const setup = this.state.ai?.setup;
+		const warn = (t: string): SvgEl => el('div', { style: 'margin-top:5px;font-size:11.5px;color:#e3d6b6;background:rgba(232,201,138,.08);border:1px solid rgba(232,201,138,.26);padding:7px 9px;border-radius:6px;line-height:1.45;' }, t);
+		if (!setup || !setup.command) return warn(AI_COPY.empty.setupNoBin);
+
+		// A wide, wrapping block is unreadable in a 290px popover, so long content
+		// scrolls sideways in its own box rather than reflowing into a wall.
+		const block = (text: string, pre: boolean): SvgEl => el('div', { style: 'position:relative;margin-top:5px;' },
+			el(pre ? 'pre' : 'code', {
+				className: 'sw-scroll',
+				style: `display:block;margin:0;font-family:"IBM Plex Mono",monospace;font-size:10.5px;line-height:1.5;color:#c4baff;background:#101014;border:1px solid rgba(255,255,255,.08);padding:7px 30px 7px 9px;border-radius:6px;user-select:all;overflow-x:auto;${pre ? 'white-space:pre;' : 'word-break:break-all;white-space:pre-wrap;'}`
+			}, text),
+			this.copyButton(text));
+
+		const v = vendor;
+		const note = (t: string): SvgEl => el('div', { style: 'font-size:10.5px;color:#6a6a78;margin-top:4px;line-height:1.45;' }, t);
+		return el('div', null,
+			v.register.json ? el('div', { style: 'font-size:11px;color:#9a9aa6;margin-top:4px;line-height:1.45;' }, v.register.json.where) : null,
+			v.register.cli
+				? block(v.register.cli(setup.command), false)
+				: block(vendorConfigJson(v, setup.command), true),
+			// Why this one re-arms as often as it does.
+			v.watchNote ? note(v.watchNote) : null,
+			setup.published ? null : note(AI_COPY.empty.setupLocal));
+	}
+
+	// ---------- AI body: a task log with the composer pinned under it ----------
+	//
+	// Not a status screen you dismiss. A finished task is the most useful thing on
+	// screen while you write the next one — what you asked, what it touched — and
+	// making someone press "Send another" to get their textarea back is friction
+	// that buys nothing. The composer is always there; the log grows above it.
+	private buildAiBody(): SvgEl {
+		const tasks = this.state.ai?.tasks || [];
+		const log = el('div', {
+			className: 'sw-scroll', 'data-sw-tasks': '1',
+			// Polite, so a screen reader announces working → done as cards change
+			// without interrupting whatever the user is typing.
+			role: 'log', 'aria-live': 'polite',
+			style: 'flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:12px 13px;'
+		}, tasks.length ? tasks.map((t) => this.buildTaskCard(t)) : this.buildEmptyLog());
+
+		// Docked to the bottom the panel is wide and short — perhaps 300px tall.
+		// Stacking a log above a composer there leaves both unusable, so the two go
+		// side by side and each gets the full height.
+		if (this.state.dock === 'bottom') {
+			const w = (this.state.aiSplit * 100).toFixed(2);
+			return el('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0;background:#101014;' },
+				this.buildContextStrip(),
+				el('div', { style: 'display:flex;flex-direction:row;flex:1;min-height:0;' },
+					el('div', { style: { flex: `0 0 ${w}%`, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, log),
+					this.buildDivider('v', 'aiSplit'),
+					el('div', { style: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, this.buildComposer(true))));
+		}
+
+		return el('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0;background:#101014;' },
+			this.buildContextStrip(),
+			log,
+			this.buildComposer(false));
+	}
+
+	private buildEmptyLog(): SvgEl {
+		return el('div', { style: 'flex:1;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px 12px;' },
+			el('span', { style: 'font-size:12px;line-height:1.6;color:#5c5c66;max-width:230px;' }, AI_COPY.log.empty));
+	}
+
+	/** One request in the running log. */
+	private buildTaskCard(t: SwAiTask): SvgEl {
+		const name = this.destName() || 'the session';
+		const C = AI_COPY.status;
+		const spec = ((): { tone: string; label: string; icon: SvgEl } => {
+			const dot = (bg: string, glow = false): SvgEl => el('span', { style: `width:7px;height:7px;border-radius:50%;background:${bg};flex:none;${glow ? `box-shadow:0 0 7px ${bg};` : ''}` });
+			switch (t.status) {
+				case 'queued': return { tone: '#9a9aa6', label: C.queuedNote, icon: this.spinner() };
+				case 'sending': return { tone: '#9a9aa6', label: C.sendingNote, icon: this.spinner() };
+				case 'working': return { tone: '#c4baff', label: fill(C.workingNote, { name }), icon: this.spinner() };
+				case 'needs_input': return { tone: '#e8c98a', label: fill(C.needsNote, { name }), icon: dot('#e8c98a') };
+				case 'done': return { tone: '#8fe8c0', label: fill(C.doneNote, { n: (t.filesTouched || []).length }), icon: dot('#34d399', true) };
+				default: return { tone: '#f87171', label: C.errorNote, icon: dot('#f87171') };
+			}
+		})();
+		const files = t.filesTouched || [];
+		return el('div', {
+			style: `background:#16161b;border:1px solid ${t.status === 'error' ? 'rgba(248,113,113,.28)' : 'rgba(255,255,255,.07)'};border-radius:9px;padding:9px 11px;flex:none;`
+		},
+			el('div', { style: 'font-size:12.5px;line-height:1.5;color:#ececf1;' }, t.prompt),
+			el('div', { style: 'display:flex;align-items:center;gap:7px;margin-top:7px;' },
+				spec.icon,
+				el('span', { style: `font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:${spec.tone};flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;` }, spec.label),
+				t.status === 'queued' ? el('button', {
+					onClick: () => void this.cancelRequest(t.id),
+					style: 'border:0;background:transparent;color:#6a6a78;font-family:"IBM Plex Sans",sans-serif;font-size:10.5px;padding:1px 5px;border-radius:4px;cursor:pointer;flex:none;'
+				}, C.cancel) : null,
+				t.status === 'error' ? el('button', {
+					onClick: () => this.setState({ prompt: t.prompt, aiFocus: AI_PROMPT_KEY }),
+					style: 'border:0;background:transparent;color:#c4baff;font-family:"IBM Plex Sans",sans-serif;font-size:10.5px;padding:1px 5px;border-radius:4px;cursor:pointer;flex:none;'
+				}, C.retry) : null),
+			t.message && t.status === 'error'
+				? el('div', { style: 'font-size:11.5px;line-height:1.5;color:#e3d6b6;margin-top:5px;' }, t.message) : null,
+			files.length ? el('div', { style: 'display:flex;flex-direction:column;gap:3px;margin-top:7px;' },
+				files.map((f) => el('div', { style: 'display:flex;align-items:center;gap:7px;background:#101014;border-radius:5px;padding:3px 7px;' },
+					el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#5fa37e;flex:none;' }, f.mark),
+					el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:#d6d3e0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, f.path),
+					f.note ? el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#6a6a78;flex:none;' }, f.note) : null))) : null);
+	}
+
+	private spinner(): SvgEl {
+		return el('span', { style: 'width:9px;height:9px;border-radius:50%;border:1.5px solid rgba(139,124,246,.3);border-top-color:#8b7cf6;animation:sw-spin .7s linear infinite;flex:none;' });
+	}
+
+	private buildContextStrip(): SvgEl {
+		const m = this.state.meta;
+		return el('div', { style: 'display:flex;align-items:center;gap:8px;padding:9px 11px 9px 13px;background:#15151a;border-bottom:1px solid rgba(255,255,255,.06);flex:none;' },
+			ic(13, '0 0 24 24', { fill: 'none', stroke: '#8b7cf6', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { flex: 'none' } },
+				pth('M12 20h9'), pth('M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z')),
+			el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:12px;color:#c4baff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, m ? m.tag : ''),
+			el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:#e8c98a;flex:none;' }, m ? m.fileLabel : ''),
+			el('span', { style: 'flex:1;' }),
+			// "Re-select" is redundant now that clicking any element re-targets. The
+			// slot goes to the one action the log actually needs.
+			(this.state.ai?.tasks || []).length ? el('button', {
+				onClick: () => void this.clearLog(),
+				style: 'display:flex;align-items:center;gap:5px;background:transparent;border:1px solid rgba(255,255,255,.1);color:#9a9aa6;font-family:"IBM Plex Sans",sans-serif;font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;flex:none;'
+			}, AI_COPY.log.clear) : null);
+	}
+
+	private buildComposer(fill: boolean): SvgEl {
+		const bound = this.boundSession();
+		const offline = this.aiOffline();
+		const linked = !!bound && !offline;
+		// A session that has just TAKEN a request is not watching — it is working.
+		// Telling someone to go ask it to watch, while the card above says that same
+		// session is running their task, reads as a bug in the panel and sends them
+		// to retype an instruction the agent does not need.
+		const busy = !!this.state.ai?.current && this.state.ai.current.status !== 'done' && this.state.ai.current.status !== 'error';
+		const needsArming = linked && bound!.state !== 'watching' && !busy && !this.state.aiArmDismissed;
+
+		const textarea = el('textarea', {
+			className: 'sw-ta sw-scroll', 'data-fkey': AI_PROMPT_KEY, spellCheck: false,
+			'aria-label': AI_COPY.composer.placeholder,
+			placeholder: AI_COPY.composer.placeholder,
+			value: this.state.prompt,
+			maxLength: SW_AI_LIMITS.prompt,
+			onChange: (e: Event) => this.setState({ prompt: (e.target as HTMLTextAreaElement).value }),
+			onFocus: () => { if (this.programmaticFocus) return; this.setState({ aiFocus: AI_PROMPT_KEY }); },
+			onBlur: () => { if (this.rebuilding || this.programmaticFocus) return; this.setState({ aiFocus: null }); },
+			onKeyDown: (e: KeyboardEvent) => {
+				if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void this.sendPrompt(); }
+			},
+			// Stacked: a fixed floor that grows with the text up to a cap, so the
+			// log keeps the rest of the height. Side-by-side: fill the column.
+			ref: fill ? undefined : (n: HTMLElement) => {
+				const t = n as HTMLTextAreaElement;
+				t.style.height = 'auto';
+				t.style.height = Math.min(Math.max(t.scrollHeight, 74), 180) + 'px';
+			},
+			style: {
+				width: '100%', ...(fill ? { flex: 1, minHeight: 60 } : { flex: 'none', height: 74, maxHeight: 180 }),
+				resize: 'none', background: '#16161b',
+				border: '1px solid rgba(255,255,255,.12)', borderRadius: 9, padding: '10px 11px', color: '#ececf1',
+				fontFamily: '"IBM Plex Sans",sans-serif', fontSize: 13, lineHeight: 1.55, outline: 'none'
+			}
+		});
+
+		return el('div', {
+			// flex:none when stacked — as flex:1 it fought the task log for height
+			// and the textarea drifted up the panel instead of sitting at the bottom.
+			style: `display:flex;flex-direction:column;min-height:0;${fill ? 'flex:1;' : 'flex:none;'}${fill ? 'border-left:1px solid rgba(255,255,255,.06);' : ''}`
+		},
+			el('div', { className: 'sw-scroll', style: `display:flex;flex-direction:column;min-height:0;padding:12px 13px 0;${fill ? 'flex:1;overflow-y:auto;' : 'flex:none;'}` },
+				offline ? this.buildOfflineBanner() : null,
+				// A refusal you can dismiss by clicking elsewhere is a refusal nobody
+				// reads. This sits with the Send button that produced it and clears
+				// itself the moment a session is linked.
+				this.state.sendBlocked && !linked ? el('div', {
+					style: 'display:flex;align-items:flex-start;gap:8px;margin-bottom:9px;padding:9px 10px;background:rgba(139,124,246,.08);border:1px solid rgba(139,124,246,.26);border-radius:8px;flex:none;'
+				},
+					ic(13, '0 0 24 24', { fill: 'none', stroke: '#bcb0ff', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { flex: 'none', marginTop: 1 } }, pth('M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z')),
+					el('span', { style: 'font-size:12px;line-height:1.5;color:#d6d3e0;' }, AI_COPY.empty.blocked)) : null,
+				needsArming ? this.buildArmNudge(bound!.name) : null,
+				textarea,
+				el('div', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:#5c5c66;padding:7px 1px 12px;flex:none;' }, AI_COPY.composer.hint)),
+			this.buildSendBar(linked, offline, bound));
+	}
+
+	/** The linked-but-not-watching nudge. An MCP server cannot start an idle agent
+	 *  working, so this is a real state with a real user action, and saying so here
+	 *  is the difference between a working feature and a request that queues forever. */
+	private buildArmNudge(name: string): SvgEl {
+		const watchMs = this.boundSession()?.watchMs;
+		// Quote what this client actually does instead of promising "once per
+		// session" — which only ever held for Claude Code.
+		const body = watchMs ? fill(AI_COPY.arm.body, { for: humanDuration(watchMs) }) : AI_COPY.arm.bodyUnknown;
+		const short = !!watchMs && watchMs < 5 * 60_000;
+		return el('div', { style: 'display:flex;align-items:flex-start;gap:9px;margin-bottom:10px;padding:9px 10px;background:rgba(139,124,246,.07);border:1px solid rgba(139,124,246,.24);border-radius:8px;' },
+			ic(13, '0 0 24 24', { fill: 'none', stroke: '#bcb0ff', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { flex: 'none', marginTop: 1 } },
+				el('circle', { cx: 12, cy: 12, r: 9 }), pth('M12 8v5M12 16h.01')),
+			el('div', { style: 'flex:1;min-width:0;' },
+				el('div', { style: 'font-size:12px;font-weight:600;color:#ececf1;' }, fill(AI_COPY.arm.title, { name })),
+				el('div', { style: 'font-size:11.5px;line-height:1.5;color:#9a9aa6;margin-top:2px;' }, body),
+				short ? el('div', { style: 'font-size:11px;line-height:1.45;color:#e3d6b6;margin-top:4px;' }, AI_COPY.arm.short) : null,
+				el('div', { style: 'display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap;' },
+					el('span', { style: 'font-size:11px;color:#6a6a78;' }, AI_COPY.arm.say),
+					el('code', { style: 'font-family:"IBM Plex Mono",monospace;font-size:11px;color:#c4baff;background:#101014;border:1px solid rgba(255,255,255,.08);padding:2px 7px;border-radius:5px;' }, AI_COPY.arm.cmd))),
+			el('button', {
+				onClick: () => this.setState({ aiArmDismissed: true }),
+				style: 'flex:none;border:0;background:transparent;color:#7e7e8c;font-family:"IBM Plex Sans",sans-serif;font-size:11px;padding:2px 6px;border-radius:5px;cursor:pointer;'
+			}, AI_COPY.arm.dismiss));
+	}
+
+	private buildOfflineBanner(): SvgEl {
+		const name = this.destName() || 'that session';
+		return el('div', { style: 'margin-bottom:10px;padding:10px 11px;background:rgba(232,201,138,.06);border:1px solid rgba(232,201,138,.26);border-radius:8px;' },
+			el('div', { style: 'display:flex;align-items:flex-start;gap:8px;' },
+				el('span', { style: 'width:7px;height:7px;border-radius:50%;background:#e8c98a;flex:none;margin-top:5px;' }),
+				el('span', { style: 'font-size:12px;line-height:1.5;color:#e3d6b6;' }, AI_COPY.offline.body)),
+			el('div', { style: 'display:flex;gap:7px;margin-top:9px;' },
+				el('button', {
+					onClick: () => void this.relinkByName(),
+					style: 'border:1px solid rgba(232,201,138,.4);background:rgba(232,201,138,.1);color:#e3d6b6;font-family:"IBM Plex Sans",sans-serif;font-size:11px;font-weight:600;padding:4px 10px;border-radius:6px;cursor:pointer;'
+				}, fill(AI_COPY.offline.relink, { name })),
+				el('button', {
+					onClick: () => this.setState({ aiPop: 'list' }),
+					style: 'border:1px solid rgba(255,255,255,.12);background:transparent;color:#9a9aa6;font-family:"IBM Plex Sans",sans-serif;font-size:11px;padding:4px 10px;border-radius:6px;cursor:pointer;'
+				}, AI_COPY.offline.other)));
+	}
+
+	private buildSendBar(linked: boolean, offline: boolean, bound: SwAiSession | null): SvgEl {
+		// The destination pill and the old header chip said the same thing twice.
+		// Merged: this one is the control, and it sits where you are already
+		// looking when you press Send.
+		const watching = linked && bound!.state === 'watching';
+		const pill = linked
+			? {
+				text: bound!.name,
+				dot: watching ? { background: '#34d399', boxShadow: '0 0 7px rgba(52,211,153,.7)' } : { background: 'transparent', border: '1.5px solid #34d399' },
+				style: 'background:rgba(52,211,153,.09);border:1px solid rgba(52,211,153,.28);color:#8fe8c0;',
+				title: watching ? fill(AI_COPY.chip.titleBound, { name: bound!.name }) : fill(AI_COPY.chip.titleIdle, { name: bound!.name })
+			}
+			: offline
+				? {
+					text: (bound ? bound.name : '') + AI_COPY.chip.offlineSuffix,
+					dot: { background: '#e8c98a' },
+					style: 'background:rgba(232,201,138,.09);border:1px dashed rgba(232,201,138,.4);color:#e3d6b6;',
+					title: fill(AI_COPY.chip.titleOffline, { name: bound ? bound.name : 'that session' })
+				}
+				: {
+					text: AI_COPY.composer.destNone,
+					dot: { background: '#4b4b57' },
+					style: 'background:transparent;border:1px dashed rgba(255,255,255,.22);color:#9a9aa6;',
+					title: AI_COPY.chip.titleNone
+				};
+		return el('div', { style: 'display:flex;align-items:center;gap:9px;padding:9px 13px;background:#15151a;border-top:1px solid rgba(255,255,255,.06);flex:none;' },
+			el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:#5c5c66;flex:none;' }, AI_COPY.composer.to),
+			el('span', { className: 'sw-pop-trigger', style: 'position:relative;display:inline-flex;flex:none;max-width:56%;min-width:0;' },
+				el('button', {
+					className: 'sw-pop-trigger', 'data-sw-chip': '1', title: pill.title, 'aria-label': pill.title,
+					onClick: () => this.toggleBindingSurface(),
+					style: `display:flex;align-items:center;gap:6px;font-family:"IBM Plex Mono",monospace;font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;min-width:0;${pill.style}`
+				},
+					el('span', { style: { width: 7, height: 7, borderRadius: '50%', flex: 'none', ...pill.dot } }),
+					el('span', { style: 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' }, pill.text),
+					ic(9, '0 0 24 24', { fill: 'currentColor', style: { opacity: 0.55, flex: 'none' } }, pth('M6 9l6 6 6-6Z'))),
+				this.state.aiPop === 'list' ? this.buildSessionList() : null),
+			el('span', { style: 'flex:1;' }),
+			// Never disabled. Pressing Send with nothing linked is a legitimate way to
+			// discover binding, and a dead button teaches nothing.
+			el('button', {
+				className: 'sw-addstyle', onClick: () => void this.sendPrompt(),
+				style: 'display:inline-flex;align-items:center;gap:6px;border:0;background:#6d5efc;color:#fff;font-family:"IBM Plex Sans",sans-serif;font-size:12.5px;font-weight:600;padding:8px 14px;border-radius:8px;cursor:pointer;flex:none;box-shadow:0 6px 18px -8px rgba(109,94,252,.9);'
+			}, AI_COPY.composer.send,
+				ic(13, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M5 12h13M13 6l6 6-6 6'))));
+	}
+
+	// ---------- AI actions ----------
+	private async linkSession(id: string): Promise<void> {
+		const ai = this.host.ai; if (!ai) return;
+		try {
+			const s = await ai.link(id);
+			this.setState({ ai: s, aiPop: null, sendBlocked: false, aiArmDismissed: false });
+			if (this.state.file) this.focusPrompt();
+		} catch { /* the SSE snapshot will correct us */ }
+	}
+	private async unlinkSession(): Promise<void> {
+		const ai = this.host.ai; if (!ai) return;
+		try { this.setState({ ai: await ai.unlink() }); } catch { /* ignore */ }
+	}
+	/** Re-bind the session the user had, by name — it comes back the moment they
+	 *  restart it, so this succeeds without them hunting through a list. */
+	private async relinkByName(): Promise<void> {
+		const name = this.destName();
+		const match = this.aiSessions().find((s) => s.name === name && s.state !== 'gone');
+		if (match) { await this.linkSession(match.id); return; }
+		await this.refreshSessions();
+		const again = this.aiSessions().find((s) => s.name === name && s.state !== 'gone');
+		if (again) await this.linkSession(again.id);
+		else this.setState({ aiPop: 'list' });
+	}
+	/** Refresh always produces a visible answer — a list, or a note. Never a dead
+	 *  end, and never red: this is setup, not failure. */
+	private async refreshSessions(): Promise<void> {
+		const ai = this.host.ai; if (!ai) return;
+		this.setState({ aiRefreshing: true, aiCheckNote: AI_COPY.empty.checking });
+		try {
+			const s = await ai.refresh();
+			const live = s.sessions.filter((x) => x.state !== 'gone');
+			this.setState({
+				ai: s, aiRefreshing: false,
+				aiCheckNote: live.length ? fill(AI_COPY.empty.checkedFound, { n: live.length }) : AI_COPY.empty.checkedNone
+			});
+		} catch {
+			this.setState({ aiRefreshing: false, aiCheckNote: AI_COPY.empty.checkedNone });
+		}
+	}
+	private async cancelRequest(requestId: string): Promise<void> {
+		const ai = this.host.ai; if (!ai) return;
+		try { this.setState({ ai: await ai.cancel(requestId) }); } catch { /* ignore */ }
+	}
+	/** Wipe finished cards. Anything still running stays. */
+	private async clearLog(): Promise<void> {
+		const ai = this.host.ai; if (!ai) return;
+		try { this.setState({ ai: await ai.clear() }); } catch { /* ignore */ }
+		this.focusPrompt();
+	}
+
+	/**
+	 * Guard order matters: an empty prompt is a no-op, no binding routes to the
+	 * setup surface with the draft intact, and only a real destination POSTs.
+	 * Send is never disabled — every refusal teaches something instead.
+	 */
+	private async sendPrompt(): Promise<void> {
+		const ai = this.host.ai; if (!ai) return;
+		const text = this.state.prompt.trim();
+		if (!text) { this.focusPrompt(); return; }
+		if (!this.state.file) return; // nothing selected — the composer isn't reachable
+
+		const bound = this.boundSession();
+		if (!bound || this.aiOffline()) {
+			// Nothing is sent. Say so where the Send button is — the refusal used to
+			// be explained only inside a surface that could be dismissed, which made
+			// pressing Send look like it had silently done nothing.
+			this.setState({ sendBlocked: true, aiPop: 'list', aiCheckNote: '' });
+			return;
+		}
+
+		const req = this.buildAiRequest();
+		if (!req) return;
+		req.prompt = text;
+		// Clear the box immediately: the prompt now lives on its card in the log.
+		this.setState({ prompt: '' });
+		this.drafts[this.draftKey(this.state.file, this.state.meta)] = '';
+		try {
+			const r = await ai.send(req);
+			if (!r.ok) {
+				const why = (AI_COPY.reason as Record<string, string>)[r.reason || ''] || '';
+				// A refusal must not strand the text — put it back in the box.
+				this.setState({ prompt: text, aiCheckNote: why });
+				if (r.reason === 'no_session' || r.reason === 'offline') this.setState({ aiPop: 'list', sendBlocked: true });
+				return;
+			}
+			this.setState({ ai: await ai.state() });
+		} catch {
+			this.setState({ prompt: text });
+		}
+	}
+
+	/**
+	 * Build the payload from what the overlay already knows. `resolveFile` and
+	 * `describe` are the same helpers the CSS path uses — the agent must be told
+	 * about the same file the editor would have written to, or the two paths
+	 * disagree about what "this element" means.
+	 */
+	private buildAiRequest(): SwAiRequest | null {
+		const file = this.state.file;
+		const node = this.pickedEl;
+		if (!file) return null;
+		const m = this.state.meta;
+		const tagName = node ? node.tagName.toLowerCase() : (m ? m.tag.replace(/[<>]/g, '').split(' ')[0] : '');
+		const classList = node ? (node.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean) : [];
+		const rect = node ? node.getBoundingClientRect() : null;
+		const base = (file.replace(/\\/g, '/').split('/').pop() || '').replace(/\.svelte$/i, '');
+		return {
+			id: uuid(),
+			createdAt: Date.now(),
+			prompt: this.state.prompt,
+			source: { file, componentName: base || undefined },
+			element: {
+				tag: m ? m.tag : (node ? tagLabel(node) : ''),
+				tagName,
+				id: node && node.id ? node.id : undefined,
+				classList,
+				selector: this.cssPathWithin(node),
+				text: node ? (node.textContent || '').trim().slice(0, SW_AI_LIMITS.elementText) || undefined : undefined,
+				rect: { width: Math.round(rect?.width || 0), height: Math.round(rect?.height || 0) }
+			},
+			context: {
+				outerHTML: truncateHtml(node ? node.outerHTML : '', SW_AI_LIMITS.outerHTML),
+				parentTag: node && node.parentElement ? tagLabel(node.parentElement) : undefined,
+				// Already fetched for the editor — handing it over costs nothing and
+				// removes most "the agent rewrote the wrong selector" failures.
+				styleRules: toServerRules(this.state.rules).slice(0, SW_AI_LIMITS.styleRules),
+				computed: node ? interestingComputed(node) : undefined
+			},
+			page: {
+				route: location.pathname,
+				url: location.href,
+				viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 },
+				breakpoint: this.state.whatIfWidth ?? undefined,
+				colorScheme: prefersLight() ? 'light' : 'dark'
+			}
+		};
+	}
+
+	/** A short, readable path from the component's root to this node. */
+	private cssPathWithin(node: Element | null): string {
+		if (!node) return this.state.meta ? this.state.meta.selectorLabel : '';
+		const parts: string[] = [];
+		let cur: Element | null = node;
+		for (let i = 0; cur && i < 4; i++) {
+			parts.unshift(this.elLabel(cur));
+			cur = cur.parentElement;
+			if (cur && resolveFile(cur) !== this.state.file) break;
+		}
+		return parts.join(' > ');
 	}
 
 	// ---------- CSS + DOM split body ----------
@@ -1483,25 +2882,29 @@ export class Panel {
 	}
 	/** Draggable divider between the two panes. `h` = horizontal bar (column split),
 	 *  `v` = vertical bar (row split). */
-	private buildDivider(axis: 'h' | 'v'): SvgEl {
+	private buildDivider(axis: 'h' | 'v', target: 'split' | 'aiSplit' = 'split'): SvgEl {
 		const horizontal = axis === 'h';
 		const grip = el('span', { style: { position: 'absolute', background: '#8b7cf6', borderRadius: 3, opacity: 0, transition: 'opacity .12s', ...(horizontal ? { left: '50%', marginLeft: -15, top: 3, height: 3, width: 30 } : { top: '50%', marginTop: -15, left: 3, width: 3, height: 30 }) } });
 		return el('div', {
-			onMouseDown: this.startSplitDrag(axis),
+			onMouseDown: this.startSplitDrag(axis, target),
 			onMouseEnter: (e: MouseEvent) => { const g = (e.currentTarget as HTMLElement).firstChild as HTMLElement | null; if (g) g.style.opacity = '1'; },
 			onMouseLeave: (e: MouseEvent) => { const g = (e.currentTarget as HTMLElement).firstChild as HTMLElement | null; if (g) g.style.opacity = '0'; },
 			style: { position: 'relative', flex: 'none', background: '#15151a', cursor: horizontal ? 'ns-resize' : 'ew-resize', ...(horizontal ? { height: 9, width: '100%', borderTop: '1px solid rgba(255,255,255,.06)', borderBottom: '1px solid rgba(255,255,255,.06)' } : { width: 9, height: '100%', borderLeft: '1px solid rgba(255,255,255,.06)', borderRight: '1px solid rgba(255,255,255,.06)' }) }
 		}, grip);
 	}
-	private startSplitDrag(axis: 'h' | 'v') {
+	private startSplitDrag(axis: 'h' | 'v', target: 'split' | 'aiSplit' = 'split') {
 		return (e: MouseEvent): void => {
 			e.preventDefault(); e.stopPropagation();
 			const container = (e.currentTarget as HTMLElement).parentElement;
 			if (!container) return;
 			const rect = container.getBoundingClientRect();
 			const mv = (ev: MouseEvent): void => {
-				if (axis === 'h') this.setState({ split: { ...this.state.split, col: this.clampN((ev.clientY - rect.top) / (rect.height || 1), 0.2, 0.85) } });
-				else this.setState({ split: { ...this.state.split, row: this.clampN((ev.clientX - rect.left) / (rect.width || 1), 0.2, 0.85) } });
+				const frac = axis === 'h'
+					? this.clampN((ev.clientY - rect.top) / (rect.height || 1), 0.2, 0.85)
+					: this.clampN((ev.clientX - rect.left) / (rect.width || 1), 0.2, 0.85);
+				if (target === 'aiSplit') this.setState({ aiSplit: frac });
+				else if (axis === 'h') this.setState({ split: { ...this.state.split, col: frac } });
+				else this.setState({ split: { ...this.state.split, row: frac } });
 			};
 			const up = (): void => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
 			document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
