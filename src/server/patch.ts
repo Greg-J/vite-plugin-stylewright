@@ -169,25 +169,33 @@ export function applyRules(source: string, rules: SwRule[], opts: ApplyRulesOpts
 	const removeSet = new Set(opts.removeIds || []);
 
 	// 1) media renames — change the enclosing @media params (moves the whole block).
+	// The client edits the OUTERMOST @media in the chain (its media[0] = the breakpoint
+	// chip), so rename that one — not node.parent, which is the INNERMOST at-rule and
+	// would corrupt a nested chain like @media(width){ @media(orientation){…} } (COR-5).
 	for (const ren of opts.mediaRenames || []) {
 		const node = idMap.get(ren.id);
-		const at = node?.parent;
-		if (at && at.type === 'atrule' && (at as postcss.AtRule).name.toLowerCase() === 'media') {
+		let outer: postcss.AtRule | null = null;
+		for (let p = node?.parent; p && p.type === 'atrule'; p = (p as postcss.AtRule).parent) {
+			if ((p as postcss.AtRule).name.toLowerCase() === 'media') outer = p as postcss.AtRule;
+		}
+		if (outer) {
 			const next = String(ren.params).trim();
-			if ((at as postcss.AtRule).params.trim() !== next) { (at as postcss.AtRule).params = next; renamed++; changed = true; }
+			if (outer.params.trim() !== next) { outer.params = next; renamed++; changed = true; }
 		}
 	}
 
-	// 2) removes — delete the rule, prune an emptied @media wrapper.
+	// 2) removes — delete the rule, then prune emptied at-rule wrappers, walking OUTWARD
+	// so a nested chain (e.g. @supports{ @media{ .x } }) doesn't leave an empty @supports.
 	for (const id of removeSet) {
 		const node = idMap.get(id);
 		if (!node) continue;
-		const at = node.parent;
+		let at = node.parent;
 		node.remove();
 		removed++; changed = true;
-		if (at && at.type === 'atrule') {
+		while (at && at.type === 'atrule') {
 			const atr = at as postcss.AtRule;
-			if (!atr.nodes || atr.nodes.length === 0) atr.remove();
+			const parent = atr.parent;
+			if (!atr.nodes || atr.nodes.length === 0) { atr.remove(); at = parent; } else break;
 		}
 	}
 
@@ -271,9 +279,31 @@ function reconcileDecls(node: postcss.Rule, desired: { prop: string; value: stri
 		return changed;
 	}
 
-	node.removeAll();
-	for (const d of want) node.append({ prop: d.prop, value: d.value });
-	return true;
+	// Slow path — a declaration was added or removed. Reconcile IN PLACE rather than
+	// node.removeAll(), which also deletes comment nodes inside the rule (COR-3 data
+	// loss). Reuse existing decl nodes (matched by prop, so their formatting survives),
+	// insert new ones after the previous decl, and drop the leftovers — comments are
+	// never touched. A pure reorder of the same props is left as-is (not reachable from
+	// the editor UI), so the output stays byte-identical in that case.
+	const pool = new Map<string, postcss.Declaration[]>();
+	for (const c of current) { const a = pool.get(c.prop); if (a) a.push(c); else pool.set(c.prop, [c]); }
+
+	let changed = false;
+	let anchor: postcss.Declaration | null = null;
+	for (const d of want) {
+		const reuse = pool.get(d.prop)?.shift();
+		if (reuse) {
+			if (reuse.value !== d.value) { reuse.value = d.value; changed = true; }
+			anchor = reuse;
+		} else {
+			const created = postcss.decl({ prop: d.prop, value: d.value });
+			if (anchor) node.insertAfter(anchor, created); else node.prepend(created);
+			changed = true;
+			anchor = created;
+		}
+	}
+	for (const arr of pool.values()) for (const leftover of arr) { leftover.remove(); changed = true; }
+	return changed;
 }
 
 /** Read the raw inner CSS of a component's <style> block (the code-editor model). */
@@ -281,6 +311,23 @@ export function readStyle(source: string): { hasStyle: boolean; css: string } {
 	const block = findStyleBlock(source);
 	if (!block) return { hasStyle: false, css: '' };
 	return { hasStyle: true, css: block.css };
+}
+
+/**
+ * Detect a markup breakout in CSS bound for a raw write into a `<style>` block.
+ * `<style>` is an HTML *raw-text* element, so its content ends at the first literal
+ * `</style` the tokenizer sees — a `content`/`url()`/comment value carrying
+ * `</style><img src=x onerror=…>` would close the block early and inject markup that
+ * runs in the dev origin. We only need this on the verbatim path (applyStyleBlock):
+ * applyEdit/applyRules re-serialize through postcss, which escapes `<` to `\3c`.
+ * Matches `</style`/`</script` case-insensitively; legitimate CSS never contains them.
+ */
+export function hasStyleBreakout(css: string): boolean {
+	// The whitespace tolerance is belt-and-braces: the HTML tokenizer only ends a
+	// raw-text element on `</` immediately followed by the tag name, but this is a
+	// reject-only check read by Svelte's parser too, and being wrong in the strict
+	// direction costs nothing — no legitimate stylesheet contains either sequence.
+	return /<\s*\/\s*(?:style|script)/i.test(css);
 }
 
 /**
@@ -311,11 +358,15 @@ export function isCompleteCss(css: string): boolean {
 export function applyStyleBlock(
 	source: string,
 	css: string
-): { code: string; changed: boolean; invalid: boolean; droppedAtRules?: boolean } {
+): { code: string; changed: boolean; invalid: boolean; droppedAtRules?: boolean; unsafe?: boolean } {
 	const block = findStyleBlock(source);
 	if (!block) return { code: source, changed: false, invalid: false };
 	if (css === block.css) return { code: source, changed: false, invalid: false };
 	if (!isCompleteCss(css)) return { code: source, changed: false, invalid: true };
+	// This path writes `css` verbatim (no postcss re-serialize), so a literal
+	// `</style>` smuggled in a string/comment would break out of the <style> block
+	// into markup. Refuse it — never persist a breakout to source.
+	if (hasStyleBreakout(css)) return { code: source, changed: false, invalid: false, unsafe: true };
 
 	// Guard against the flat whole-block serializer destroying structure. The
 	// editor's in-memory model is a flat list of rules with no at-rule context, so

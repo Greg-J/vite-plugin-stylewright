@@ -194,6 +194,27 @@ const pth = (d: string, opts?: ElProps): SvgEl => el('path', { d, ...(opts || {}
 const toRect = (r: DOMRect): Rect => ({ top: r.top, left: r.left, width: r.width, height: r.height });
 /** Collapse insignificant whitespace so two source selectors compare equal. */
 const normSel = (s: string): string => s.replace(/\s+/g, ' ').trim();
+/** Re-point a restored undo/redo snapshot onto the CURRENT source rules by stable
+ *  identity (selector + @media signature) instead of fragile walk-order ids — so an
+ *  undo across a structural change patches/creates/removes the right rules rather than
+ *  corrupting an unrelated one (COR-7, superseding COR-2's history-reset). A snapshot
+ *  rule that matches a current rule carries its id (→ patch); an unmatched snapshot rule
+ *  gets no id (→ create); a current rule absent from the snapshot goes in removeIds.
+ *  Duplicate (selector+@media) rules are matched positionally within their group. */
+export function rekeyToCurrent(snapshot: Rule[], current: Rule[]): { rules: Rule[]; removeIds: number[] } {
+	const sig = (r: Rule): string => normSel(r.sel) + '' + (r.media || []).map((m) => m.name + ' ' + String(m.params).trim()).join('');
+	const pool = new Map<string, Rule[]>();
+	for (const c of current) { const k = sig(c); const a = pool.get(k); if (a) a.push(c); else pool.set(k, [c]); }
+	const matched = new Set<Rule>();
+	const rules: Rule[] = snapshot.map((s) => {
+		const c = pool.get(sig(s))?.shift();
+		if (c) { matched.add(c); return { ...s, id: c.id }; }
+		return { ...s, id: undefined };
+	});
+	const removeIds: number[] = [];
+	for (const c of current) if (!matched.has(c) && typeof c.id === 'number') removeIds.push(c.id);
+	return { rules, removeIds };
+}
 /** Pull min-width / max-width pixel bounds from a media query's params. Returns null
  *  for a non-width query (orientation, etc.) so the caller falls back to matchMedia. */
 function parseWidthQuery(params: string): { min?: number; max?: number } | null {
@@ -456,6 +477,20 @@ export class Panel {
 	/** Memoized DOM-tree node, reused across renders while `state.treeRev` is
 	 *  unchanged (a DOM node can be detached + re-appended, which `render()` does). */
 	private treeCache: { rev: number; node: SvgEl } | null = null;
+	// Render-hot-path memos. activeMemo/mediaMemo are viewport-dependent → cleared every
+	// render; orderCache/selGroupCache are keyed by the selector signature so they
+	// survive value-only re-renders (a CSS keystroke). Together these turn the
+	// per-render document walk and the O(decls×rules) cascade rescan into ~O(1)
+	// lookups on the typing hot path (PERF-1, PERF-3).
+	private activeMemo = new Map<Rule, boolean>();
+	private mediaMemo = new Map<string, boolean>();
+	private orderCache: { key: string; order: number[] } | null = null;
+	private selGroupCache: { key: string; map: Map<string, number[]> } | null = null;
+	// The DOM-tree model (the buildDomTree walk) cached separately from row rendering so
+	// expand/collapse re-renders rows WITHOUT rewalking the document (PERF-4). Bumped on
+	// pick / show / manual refresh — not on toggle.
+	private domModelRev = 0;
+	private domModelCache: { rev: number; roots: DomNode[]; byEl: Map<Element, DomNode> } | null = null;
 
 	// one global undo/redo timeline across every file edited this session
 	private history = new History<PickMeta | null>();
@@ -695,6 +730,7 @@ export class Panel {
 		const prevTree = this.rootEl.querySelector('[data-sw-tree]') as HTMLElement | null;
 		const treeScroll = prevTree ? prevTree.scrollTop : 0; // the DOM-tree pane scrolls independently
 		const caret = this.captureCaret(); // the rebuild destroys the focused input — keep its caret
+		this.activeMemo.clear(); this.mediaMemo.clear(); // viewport-dependent memos: one render's worth
 		this.nextPops = new Set(); // fresh set each render (don't clear the committed one — it's aliased)
 		// Tearing down the focused input fires a synthetic blur; flag the rebuild so the
 		// inputs' onBlur handlers ignore it (a real user blur happens outside a render).
@@ -902,6 +938,7 @@ export class Panel {
 		if (this.state.color) this.closeColorPicker();
 		this.stashDraft(); // park the outgoing element's prompt before we switch
 		this.pickedEl = el || null; // selects this node's tree row + auto-expands its ancestors
+		this.domModelRev++; // a pick navigates/selects → the DOM model may have changed (PERF-4)
 		const treeRev = this.state.treeRev + 1; // the selection moved → rebuild the tree
 		const prompt = this.loadDraft(file, meta);
 		if (!file) { this.setState({ view: 'no-meta', hl: null, file: null, meta, rules: [], treeRev, prompt }); return; }
@@ -992,10 +1029,28 @@ export class Panel {
 
 	// ---------- global undo / redo (one timeline across every file) ----------
 	private applyHistState(s: HistState<PickMeta | null>, label: string): void {
-		// The restored state may belong to a different file — switch the view to it
-		// and write it back to that file's source.
-		this.setState({ file: s.file, meta: s.meta, rules: s.rules, view: s.file ? 'editing' : this.state.view, color: null, menu: null, focus: null, status: { kind: 'idle', text: label } });
-		this.save();
+		// The restored state may belong to a different file — switch the view to it.
+		// The snapshot's source ids may be stale (a structural op since then renumbered
+		// them), so DON'T write it back by id; re-key against the live source first.
+		this.setState({ file: s.file, meta: s.meta, rules: s.rules, view: s.file ? 'editing' : this.state.view, color: null, menu: null, focus: null, status: { kind: 'saving', text: label } });
+		if (s.file) void this.saveRestored(s.file, s.rules, label);
+	}
+	/** Persist a restored undo/redo snapshot by re-keying it onto the file's CURRENT
+	 *  source (selector + @media identity), so an undo across a structural change
+	 *  recreates/removes/patches the right rules instead of corrupting one by stale id
+	 *  (COR-7). Replaces the old blind, id-keyed save() on the restore path. */
+	private async saveRestored(file: string, snapshot: Rule[], label: string): Promise<void> {
+		try {
+			const resp = await this.host.loadRules(file);
+			const current = resp.hasStyle && !resp.error ? fromServerRules(resp.rules) : [];
+			const { rules, removeIds } = rekeyToCurrent(snapshot, current);
+			const d = await this.host.applyRules(file, toServerRules(rules), removeIds.length ? { removeIds } : undefined);
+			if (!d.ok) { this.setState({ status: { kind: 'err', text: d.error || 'Undo save failed' } }); return; }
+			// creates/removes shift ids → re-fetch so the editor model + future saves align.
+			await this.reloadRules(label);
+		} catch (err) {
+			this.setState({ status: { kind: 'err', text: 'Undo failed: ' + String(err) } });
+		}
 	}
 	private undo(): void {
 		const s = this.history.undo();
@@ -1611,17 +1666,28 @@ export class Panel {
 	 *  other at-rules are treated as always-on so we don't dim them. */
 	private atRuleMatches(m: SwAtRule): boolean {
 		if (m.name.toLowerCase() !== 'media') return true;
+		const memo = this.mediaMemo.get(m.params);
+		if (memo !== undefined) return memo;
+		const res = this.computeAtRuleMatch(m.params);
+		this.mediaMemo.set(m.params, res);
+		return res;
+	}
+	private computeAtRuleMatch(params: string): boolean {
 		const w = this.state.whatIfWidth;
 		if (w != null) {
-			const q = parseWidthQuery(m.params);
+			const q = parseWidthQuery(params);
 			// Previewing a width: evaluate width queries against it; a non-width query
 			// (orientation, etc.) can't be simulated, so fall through to the real match.
 			if (q) return (q.min == null || w >= q.min) && (q.max == null || w <= q.max);
 		}
-		try { return window.matchMedia(m.params).matches; } catch { return true; }
+		try { return window.matchMedia(params).matches; } catch { return true; }
 	}
 	private ruleActive(rule: Rule): boolean {
-		return !rule.media || rule.media.every((m) => this.atRuleMatches(m));
+		const memo = this.activeMemo.get(rule);
+		if (memo !== undefined) return memo;
+		const res = !rule.media || rule.media.every((m) => this.atRuleMatches(m));
+		this.activeMemo.set(rule, res);
+		return res;
 	}
 	/** If `prop` in rule `ri` is overridden at the CURRENT viewport by another ACTIVE
 	 *  rule with the same selector later in the cascade (typically a wider @media
@@ -1634,14 +1700,20 @@ export class Panel {
 		const base = rs[ri];
 		if (!base || !this.ruleActive(base)) return null; // inactive rules are dimmed wholesale already
 		const sel = normSel(base.sel);
+		// Only same-selector rules can override at equal specificity — look them up
+		// instead of rescanning (and re-normSel-ing) the whole rule list per decl (PERF-3).
+		const group = this.selGroups().get(sel);
+		if (!group || group.length < 2) return null;
 		const ord = (r: Rule, i: number) => (typeof r.id === 'number' ? r.id : i);
 		let winnerIdx = -1, winnerOrd = ord(base, ri);
-		rs.forEach((r, i) => {
-			if (i === ri || normSel(r.sel) !== sel || !this.ruleActive(r)) return;
-			if (!r.decls.some((d) => d.p.trim() === p && d.v.trim())) return;
+		for (const i of group) {
+			if (i === ri) continue;
+			const r = rs[i];
+			if (!this.ruleActive(r)) continue;
+			if (!r.decls.some((d) => d.p.trim() === p && d.v.trim())) continue;
 			const o = ord(r, i);
 			if (o > winnerOrd) { winnerIdx = i; winnerOrd = o; }
-		});
+		}
 		if (winnerIdx < 0) return null;
 		const w = rs[winnerIdx];
 		const hasMedia = !!(w.media && w.media.length);
@@ -1653,8 +1725,25 @@ export class Panel {
 	 *  so each @media override lands right under its base rule; same-element rules keep
 	 *  source order; selectors matching nothing on the page sink to the bottom. Returns
 	 *  source indices (ri) in display order — ri stays the array index used for editing. */
+	/** normalized-selector → source indices sharing it, in array order. Cached by the
+	 *  selector signature, so it's built once per distinct rule set and reused across a
+	 *  render's per-declaration overriddenBy() calls (PERF-3). */
+	private selGroups(): Map<string, number[]> {
+		const rs = this.state.rules;
+		const key = rs.map((r) => r.sel).join('');
+		if (this.selGroupCache && this.selGroupCache.key === key) return this.selGroupCache.map;
+		const map = new Map<string, number[]>();
+		rs.forEach((r, i) => { const s = normSel(r.sel); const a = map.get(s); if (a) a.push(i); else map.set(s, [i]); });
+		this.selGroupCache = { key, map };
+		return map;
+	}
 	private orderedView(): number[] {
 		const rs = this.state.rules;
+		// DOM order is invariant under CSS edits, so memoize it keyed by the selector set
+		// + treeRev (which bumps on pick/DOM change). A value keystroke reuses it instead
+		// of walking the whole document every render (PERF-1).
+		const cacheKey = this.state.treeRev + '|' + rs.map((r) => r.sel).join('');
+		if (this.orderCache && this.orderCache.key === cacheKey) return this.orderCache.order;
 		const idx = rs.map((_, i) => i);
 		const FAR = Number.MAX_SAFE_INTEGER;
 		let pos: Map<Element, number> | null = null;
@@ -1670,7 +1759,9 @@ export class Panel {
 			return elx ? (pos.get(elx) ?? FAR) : FAR;
 		};
 		const key = new Map<number, number>(idx.map((i) => [i, domIndex(rs[i].sel)]));
-		return idx.sort((a, b) => (key.get(a)! - key.get(b)!) || (a - b));
+		const order = idx.sort((a, b) => (key.get(a)! - key.get(b)!) || (a - b));
+		this.orderCache = { key: cacheKey, order };
+		return order;
 	}
 	/** Short label for an @media chip, e.g. "@media ≥768". */
 	private shortMedia(m: SwAtRule): string {
@@ -2919,7 +3010,7 @@ export class Panel {
 				el('span', { style: 'font-family:"IBM Plex Sans",sans-serif;font-size:11px;font-weight:700;letter-spacing:.12em;color:#7e7e8c;' }, 'DOM'),
 				el('span', { style: 'flex:1;' }),
 				el('span', { style: 'font-family:"IBM Plex Mono",monospace;font-size:10px;color:#5c5c66;white-space:nowrap;' }, 'hover → highlight · click → edit'),
-				el('button', { className: 'sw-iconbtn', title: 'Rebuild tree from the live DOM', onClick: () => this.bumpTree(), style: 'display:flex;align-items:center;justify-content:center;width:20px;height:20px;border:0;background:transparent;color:#7e7e8c;border-radius:5px;cursor:pointer;flex:none;' },
+				el('button', { className: 'sw-iconbtn', title: 'Rebuild tree from the live DOM', onClick: () => { this.domModelRev++; this.bumpTree(); }, style: 'display:flex;align-items:center;justify-content:center;width:20px;height:20px;border:0;background:transparent;color:#7e7e8c;border-radius:5px;cursor:pointer;flex:none;' },
 					ic(12, '0 0 24 24', { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, pth('M21 12a9 9 0 1 1-2.64-6.36'), pth('M21 3v6h-6')))),
 			el('div', { className: 'sw-scroll', 'data-sw-tree': '1', style: 'flex:1;min-height:0;overflow:auto;padding:6px 2px 12px;' }, this.buildTree()));
 	}
@@ -2931,7 +3022,15 @@ export class Panel {
 		let body: Element | null = null;
 		try { body = document.body; } catch { body = null; }
 		if (!body) return el('div', { style: 'padding:14px;color:#7e7e8c;font-size:12px;font-family:"IBM Plex Mono",monospace;' }, 'No document body.');
-		const { roots, byEl } = buildDomTree(body, this.shadow.host as Element);
+		// Reuse the walked DOM model across expand/collapse (only rows re-render); rewalk
+		// only when domModelRev bumped — pick / show / manual refresh (PERF-4).
+		let model = this.domModelCache;
+		if (!model || model.rev !== this.domModelRev) {
+			const built = buildDomTree(body, this.shadow.host as Element);
+			model = { rev: this.domModelRev, roots: built.roots, byEl: built.byEl };
+			this.domModelCache = model;
+		}
+		const { roots, byEl } = model;
 		const pickedNode = this.pickedEl ? byEl.get(this.pickedEl) : undefined;
 		const autoOpen = pickedNode ? pathPrefixes(pickedNode.path) : new Set<string>();
 		const out: SvgEl[] = [];

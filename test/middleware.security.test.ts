@@ -68,6 +68,7 @@ interface CallOpts {
 	origin?: string;
 	swHeader?: boolean;
 	auth?: string;
+	contentType?: string;
 	body?: unknown;
 	remote?: string;
 }
@@ -82,6 +83,10 @@ async function call(mw: ReturnType<typeof createStylewrightMiddleware>, o: CallO
 	if (o.auth) headers.authorization = o.auth;
 
 	const payload = o.body === undefined ? null : JSON.stringify(o.body);
+	// The real overlay always sends JSON, and the guard now requires it — so a
+	// test that supplies a body is testing a JSON request unless it says otherwise.
+	if (payload !== null) headers['content-type'] = o.contentType ?? 'application/json';
+	else if (o.contentType) headers['content-type'] = o.contentType;
 	const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
 	const req = {
 		method: o.method || 'GET',
@@ -154,7 +159,10 @@ describe('the whole-block save cannot escape the <style> element', () => {
 		const src = '<script>let a=1;</script>\n<h1>hi</h1>\n<style>h1{color:blue}</style>\n';
 		const out = applyStyleBlock(src, attack);
 		expect(out.changed).toBe(false);
-		expect(out.invalid).toBe(true);
+		// `unsafe`, not `invalid`: the CSS parses fine, which is exactly why the
+		// completeness check never caught this. They are reported separately so the
+		// overlay can say which one happened.
+		expect(out.unsafe).toBe(true);
 		expect(out.code).toBe(src);
 	});
 

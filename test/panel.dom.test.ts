@@ -9,8 +9,9 @@
 // re-render loop into a fast, clear failure instead of a hang.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Panel, type PanelHost, type PickMeta } from '../src/client/panel.js';
+import { Panel, rekeyToCurrent, type PanelHost, type PickMeta } from '../src/client/panel.js';
 import type { SwRule } from '../src/shared/protocol.js';
+import { fromServerRules, type Rule } from '../src/client/rules.js';
 
 const META: PickMeta = { fileLabel: 'Button.svelte', selectorLabel: '.btn', dims: '0 × 0', tag: '<button class="btn">' };
 const RULES: SwRule[] = [
@@ -547,5 +548,63 @@ describe('Panel: DOM tree pane', () => {
 		const hl = (ctx.panel as unknown as { state: { hl: { tag: string } | null } }).state.hl;
 		expect(hl).toBeTruthy();
 		expect(hl!.tag).toContain('section'); // tagLabel of the hovered element
+	});
+});
+
+describe('Panel: undo survives structural ops via re-keying (COR-7)', () => {
+	type Internals = {
+		history: { canUndo(): boolean };
+		removeRule(ri: number): Promise<void>;
+		updateDecl(ri: number, di: number, field: 'p' | 'v', val: string): void;
+		undo(): void;
+	};
+	it('a rule removal leaves earlier edits undoable, and an undo replays without throwing', async () => {
+		const RULES_IDS: SwRule[] = [
+			{ id: 0, selector: '.a', decls: [{ prop: 'color', value: 'red' }] },
+			{ id: 1, selector: '.b', decls: [{ prop: 'color', value: 'blue' }] }
+		];
+		const ctx = makePanel(RULES_IDS);
+		await ctx.panel.pick('Button.svelte', META);
+		await tick();
+		const p = ctx.panel as unknown as Internals;
+		p.updateDecl(0, 0, 'v', 'green');
+		await tick();
+		expect(p.history.canUndo()).toBe(true);
+		// COR-7: a structural op no longer wipes history (COR-2 did); the restore re-keys
+		// onto the live source, so undo stays available and replays safely.
+		await p.removeRule(0);
+		await tick();
+		expect(p.history.canUndo()).toBe(true);
+		ctx.saved.rules = null; // ignore the removeRule save; watch for the undo's save
+		p.undo();
+		await tick();
+		expect(ctx.saved.rules).not.toBeNull(); // the re-keyed undo issued a save, no throw
+	});
+});
+
+describe('rekeyToCurrent — re-point a snapshot onto live source (COR-7)', () => {
+	const sv = (id: number | undefined, sel: string, v: string, media?: { name: string; params: string }[]): SwRule => ({ id, selector: sel, decls: [{ prop: 'color', value: v }], media });
+	it('recreates a snapshot rule the current source no longer has (undo of a remove)', () => {
+		const snapshot: Rule[] = fromServerRules([sv(0, '.a', 'red'), sv(1, '.b', 'blue')]); // had both
+		const current: Rule[] = fromServerRules([sv(0, '.b', 'blue')]);                        // .a was removed → reindexed
+		const { rules, removeIds } = rekeyToCurrent(snapshot, current);
+		expect(removeIds).toEqual([]);                                  // nothing to delete
+		const a = rules.find((r) => r.sel === '.a')!, b = rules.find((r) => r.sel === '.b')!;
+		expect(a.id).toBeUndefined();                                  // .a → create (recreate it)
+		expect(b.id).toBe(0);                                          // .b → patch the CURRENT id (0, not stale 1)
+	});
+	it('removes a current rule the snapshot does not have (undo of an add)', () => {
+		const snapshot: Rule[] = fromServerRules([sv(0, '.a', 'red')]);                  // before the add
+		const current: Rule[] = fromServerRules([sv(0, '.a', 'red'), sv(1, '.x', 'p', [{ name: 'media', params: '(min-width: 768px)' }])]);
+		const { rules, removeIds } = rekeyToCurrent(snapshot, current);
+		expect(removeIds).toEqual([1]);                                // the added .x → remove
+		expect(rules.find((r) => r.sel === '.a')!.id).toBe(0);        // .a → patch
+	});
+	it('distinguishes same-selector rules by their @media signature', () => {
+		const base = sv(0, '.a', 'red');
+		const resp = sv(1, '.a', 'navy', [{ name: 'media', params: '(min-width: 768px)' }]);
+		const { rules, removeIds } = rekeyToCurrent(fromServerRules([base, resp]), fromServerRules([base, resp]));
+		expect(removeIds).toEqual([]);
+		expect(rules.map((r) => r.id)).toEqual([0, 1]); // each matched its same-selector+media twin
 	});
 });

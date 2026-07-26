@@ -22,7 +22,14 @@ const CLOSE = '</style>';
  * Locate the first `<style>` block. Returns `null` when the component has none.
  */
 export function findStyleBlock(source: string): StyleBlock | null {
-	const m = STYLE_RE.exec(source);
+	// Mask <script>…</script> bodies and <!-- … --> comments with equal-length blanks so
+	// a <style> literal living inside a script string or a comment can't be mistaken for
+	// the component's real style block (TEST-4). Only the search runs on the masked copy;
+	// offsets are length-preserved and the css is sliced from the ORIGINAL source.
+	const masked = source
+		.replace(/(<script(?:\s[^>]*)?>)([\s\S]*?)(<\/script>)/gi, (_m, open, body, close) => open + ' '.repeat(body.length) + close)
+		.replace(/<!--[\s\S]*?-->/g, (c) => ' '.repeat(c.length));
+	const m = STYLE_RE.exec(masked);
 	if (!m) return null;
 	const full = m[0];
 	const inner = m[1];
