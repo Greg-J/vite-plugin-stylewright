@@ -10,9 +10,10 @@ import type { Connect } from 'vite';
 import type { ServerResponse } from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readRules, applyEdit, applyRules, readStyle, applyStyleBlock } from './patch.js';
+import { resolveSvelteFile } from './paths.js';
+import { guardBrowserRequest, refuse } from './guard.js';
 import type {
 	SwRulesResponse,
 	SwEditRequest,
@@ -24,25 +25,9 @@ import type {
 
 const PREFIX = '/__stylewright';
 
-/**
- * Resolve a client-supplied path to an absolute .svelte file that lives INSIDE
- * the project root. Returns null for anything that escapes the root, isn't a
- * .svelte file, or doesn't exist — the guard against writing arbitrary files.
- */
-function resolveSvelteFile(root: string, file: string): string | null {
-	if (!file) return null;
-	const abs = normalize(isAbsolute(file) ? file : join(root, file));
-	const nRoot = normalize(root);
-	// Case-insensitive compare so Windows drive-letter casing (d:\ vs D:\) can't
-	// be used to dodge the root containment check.
-	const a = abs.toLowerCase();
-	const r = (nRoot.endsWith(sep) ? nRoot : nRoot + sep).toLowerCase();
-	const within = a === nRoot.toLowerCase() || a.startsWith(r);
-	if (!within) return null;
-	if (!abs.toLowerCase().endsWith('.svelte')) return null;
-	if (!existsSync(abs)) return null;
-	return abs;
-}
+/** Delegate for everything under `/__stylewright/ai` — supplied by the plugin so
+ *  the AI path stays out of this module (and out of the bundle when disabled). */
+export type AiHandler = (req: Connect.IncomingMessage, res: ServerResponse, path: string) => Promise<boolean>;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	const text = JSON.stringify(body);
@@ -52,14 +37,28 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.end(text);
 }
 
+const MAX_BODY = 1_000_000;
+
+/**
+ * Buffer the request body with a hard cap. Chunks are collected as Buffers and
+ * decoded once at the end: concatenating them as strings decodes each chunk
+ * independently, so a multi-byte character split across a TCP boundary becomes
+ * U+FFFD before JSON.parse ever sees it. Over-limit destroys the socket rather
+ * than settling the promise and quietly carrying on accumulating.
+ */
 function readBody(req: Connect.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
-		let data = '';
-		req.on('data', (chunk) => {
-			data += chunk;
-			if (data.length > 1_000_000) reject(new Error('body too large'));
+		const parts: Buffer[] = [];
+		let len = 0;
+		let stopped = false;
+		req.on('data', (chunk: Buffer | string) => {
+			if (stopped) return;
+			const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+			len += b.length;
+			if (len > MAX_BODY) { stopped = true; reject(new Error('body too large')); req.destroy(); return; }
+			parts.push(b);
 		});
-		req.on('end', () => resolve(data));
+		req.on('end', () => { if (!stopped) resolve(Buffer.concat(parts).toString('utf8')); });
 		req.on('error', reject);
 	});
 }
@@ -171,10 +170,25 @@ export function createHtmlInjectMiddleware(): Connect.NextHandleFunction {
 	};
 }
 
-export function createStylewrightMiddleware(root: string): Connect.NextHandleFunction {
+export function createStylewrightMiddleware(root: string, ai?: AiHandler): Connect.NextHandleFunction {
 	return async (req, res, next) => {
 		const url = req.url || '';
 		if (!url.startsWith(PREFIX)) return next();
+
+		// Everything below reads or writes the developer's source tree, so every
+		// route is gated before it is dispatched: same-origin only, no
+		// attacker-controlled Host (DNS rebinding), and writes additionally need a
+		// header no cross-site form can set. See guard.ts for the threat model.
+		// The AI routes gate themselves — /ai/agent/* uses a token, not browser rules.
+		const aiPath = url.slice(PREFIX.length).split('?')[0];
+		if (aiPath.startsWith('/ai')) {
+			if (!ai) { res.statusCode = 404; res.end(); return; }
+			if (await ai(req, res, aiPath.slice(3) || '/')) return;
+			return next();
+		}
+
+		const g = guardBrowserRequest(req, req.method !== 'GET');
+		if (!g.ok) return refuse(res, g);
 
 		// --- serve the overlay bundle ---
 		if (req.method === 'GET' && url.startsWith(`${PREFIX}/client.js`)) {

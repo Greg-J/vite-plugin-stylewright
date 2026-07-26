@@ -467,9 +467,19 @@ describe('Panel: focus the picked element', () => {
 describe('Panel: DOM tree pane', () => {
 	const pickableRow = (s: ShadowRoot, needle: string) =>
 		[...s.querySelectorAll('div')].find((d) => d.style.cursor === 'pointer' && (d.textContent || '').includes(needle))!;
-	// the header toggle's title flips Show/Hide — both end with "DOM tree"
-	const toggleTree = (s: ShadowRoot) =>
-		[...s.querySelectorAll('button')].find((b) => /DOM tree$/.test(b.title))!.dispatchEvent(new MouseEvent('click'));
+	// The DOM tree is a preference now, so it is toggled from Settings rather than
+	// a dedicated header button — two controls for one setting was one too many in
+	// a 300px header.
+	const toggleTree = async (s: ShadowRoot): Promise<void> => {
+		s.querySelector<HTMLElement>('button[aria-label="Settings"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await tick();   // the popover only exists after the re-render
+		const row = [...s.querySelectorAll<HTMLElement>('[role="switch"]')].find((b) => /DOM tree/.test(b.textContent || ''));
+		row!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await tick();
+		// Close it again so it cannot sit over whatever the test asserts next.
+		s.querySelector<HTMLElement>('button[aria-label="Settings"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await tick();
+	};
 
 	it('is hidden by default and the header toggle shows/hides it', async () => {
 		document.body.appendChild(Object.assign(document.createElement('div'), { className: 'widget' }));
@@ -477,9 +487,9 @@ describe('Panel: DOM tree pane', () => {
 		await ctx.panel.pick('Button.svelte', META);
 		await tick();
 		expect(ctx.shadow.textContent || '').not.toContain('highlight'); // pane off by default
-		toggleTree(ctx.shadow); await tick();
+		await toggleTree(ctx.shadow);
 		expect(ctx.shadow.textContent || '').toContain('highlight'); // shown (pane header text)
-		toggleTree(ctx.shadow); await tick();
+		await toggleTree(ctx.shadow);
 		expect(ctx.shadow.textContent || '').not.toContain('highlight'); // hidden again
 	});
 
@@ -491,7 +501,7 @@ describe('Panel: DOM tree pane', () => {
 		const ctx = makePanel([{ id: 0, selector: '.btn', decls: [{ prop: 'color', value: 'white' }] }]);
 		await ctx.panel.pick('Button.svelte', META); // open the panel (no element → tree default-expanded)
 		await tick();
-		toggleTree(ctx.shadow); await tick(); // DOM pane is off by default
+		await toggleTree(ctx.shadow); // DOM pane is off by default
 		const text = ctx.shadow.textContent || '';
 		expect(text).toContain('DOM');   // pane header
 		expect(text).toContain('.card'); // tree row for the card
@@ -511,7 +521,7 @@ describe('Panel: DOM tree pane', () => {
 		const ctx = makePanel();
 		await ctx.panel.pick('Button.svelte', META);
 		await tick();
-		toggleTree(ctx.shadow); await tick();
+		await toggleTree(ctx.shadow);
 		const treeNode = () => ctx.shadow.querySelector('[data-sw-tree]')!.firstElementChild;
 		const before = treeNode();
 		// hover changes only the highlight → the tree node must be REUSED
@@ -531,7 +541,7 @@ describe('Panel: DOM tree pane', () => {
 		const ctx = makePanel();
 		await ctx.panel.pick('Button.svelte', META);
 		await tick();
-		toggleTree(ctx.shadow); await tick(); // DOM pane is off by default
+		await toggleTree(ctx.shadow); // DOM pane is off by default
 		pickableRow(ctx.shadow, '.hero').dispatchEvent(new MouseEvent('mouseenter'));
 		await tick();
 		const hl = (ctx.panel as unknown as { state: { hl: { tag: string } | null } }).state.hl;

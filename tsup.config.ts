@@ -15,6 +15,19 @@ export default defineConfig([
 		// Host-provided / heavy deps stay external; bundle nothing the host already has.
 		external: ['vite', 'svelte', 'svelte/compiler', 'postcss', 'magic-string']
 	},
+	// The MCP server — a separate bin so an agent can run it without loading Vite.
+	// Dependency-free by design (stdio JSON-RPC), so nothing is external here.
+	{
+		entry: { mcp: 'src/mcp/bin.ts' },
+		format: ['esm'],
+		target: 'node18',
+		platform: 'node',
+		clean: false,
+		dts: false,
+		shims: true
+		// No `banner` here: src/mcp/bin.ts already starts with a shebang and tsup
+		// preserves it. Adding one emits it twice, which is a syntax error.
+	},
 	// The browser overlay — a single self-contained IIFE the plugin injects into the
 	// page in dev. Bundles everything so the host page needs no module resolution.
 	{

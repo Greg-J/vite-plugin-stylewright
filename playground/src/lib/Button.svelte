@@ -1,11 +1,11 @@
 <script>
-	let { label = 'Button' } = $props();
+	let { label = 'Button', secondary = false } = $props();
 </script>
 
-<button class="btn">{label}</button>
+<button class="btn" class:secondary>{label}</button>
 
 <style>
-	.btn {
+		.btn {
 		background: #ff3e00;
 		color: #ffffff;
 		border: 0;
@@ -17,7 +17,18 @@
 		transition: background 0.15s;
 	}
 
-	.btn:hover {
+		.btn:hover {
 		background: #e63600;
+	}
+
+		.btn.secondary {
+		background: transparent;
+		color: #ff3e00;
+		border: 2px solid #ff3e00;
+	}
+
+		.btn.secondary:hover {
+		background: #ff3e00;
+		color: #ffffff;
 	}
 </style>

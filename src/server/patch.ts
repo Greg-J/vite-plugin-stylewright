@@ -340,6 +340,15 @@ export function applyStyleBlock(
 		}
 	}
 
+	// This path splices the client's text into the file VERBATIM (unlike /apply and
+	// /edit, which re-serialize through postcss and escape `<`). A payload
+	// containing `</style>` would therefore close the block early and everything
+	// after it becomes markup or script in the component — under SSR that is code
+	// execution in the dev server. postcss parses such a string happily, so the
+	// completeness check above does not catch it. Refuse outright: no legitimate
+	// stylesheet contains this sequence.
+	if (/<\s*\/\s*style/i.test(css)) return { code: source, changed: false, invalid: true };
+
 	const ms = new MagicString(source);
 	ms.overwrite(block.start, block.end, css);
 	return { code: ms.toString(), changed: true, invalid: false };

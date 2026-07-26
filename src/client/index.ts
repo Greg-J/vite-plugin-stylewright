@@ -6,12 +6,27 @@
 // Element -> source file resolution uses Svelte's dev metadata (`__svelte_meta`).
 // This module owns booting + the real element picker; the Panel owns the UI.
 
-import type { SwRule, SwRulesResponse, SwStyleSaveResponse, SwApplyResponse } from '../shared/protocol.js';
+import type { SwRule, SwRulesResponse, SwStyleSaveResponse, SwApplyResponse, SwAiState, SwAiSendResponse } from '../shared/protocol.js';
 import { Panel, type PanelHost } from './panel.js';
 import { describe, resolveFile, shortPath, tagLabel } from './inspect.js';
 import { ensureFonts, SHADOW_CSS } from './theme.js';
 
 const PREFIX = '/__stylewright';
+
+/**
+ * Every mutating call carries `x-stylewright: 1`. A cross-site <form> or a
+ * no-preflight request cannot set a custom header, so this is what stops another
+ * page the developer has open from POSTing edits into their source tree. The
+ * server refuses writes without it — see src/server/guard.ts.
+ */
+async function post<T>(path: string, body: unknown): Promise<T> {
+	const res = await fetch(`${PREFIX}${path}`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', 'x-stylewright': '1' },
+		body: JSON.stringify(body)
+	});
+	return (await res.json()) as T;
+}
 
 const serverHost: PanelHost = {
 	async loadRules(file) {
@@ -20,20 +35,35 @@ const serverHost: PanelHost = {
 		return { hasStyle: data.hasStyle, rules: data.rules, error: data.error };
 	},
 	async applyRules(file: string, rules: SwRule[], opts?: { removeIds?: number[]; mediaRenames?: { id: number; params: string }[] }) {
-		const res = await fetch(`${PREFIX}/apply`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ file, rules, removeIds: opts?.removeIds, mediaRenames: opts?.mediaRenames })
-		});
-		return (await res.json()) as SwApplyResponse;
+		return post<SwApplyResponse>('/apply', { file, rules, removeIds: opts?.removeIds, mediaRenames: opts?.mediaRenames });
 	},
 	async saveCss(file, css) {
-		const res = await fetch(`${PREFIX}/style`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ file, css })
-		});
-		return (await res.json()) as SwStyleSaveResponse;
+		return post<SwStyleSaveResponse>('/style', { file, css });
+	},
+
+	// The AI path is optional. boot() strips this off when the plugin was
+	// configured with `ai: false`, so the panel hides the tab entirely rather
+	// than offering one whose every route 404s.
+	ai: {
+		state: () => fetch(`${PREFIX}/ai/state`).then((r) => r.json() as Promise<SwAiState>),
+		link: (sessionId: string) => post<SwAiState>('/ai/link', { sessionId }),
+		unlink: () => post<SwAiState>('/ai/unlink', {}),
+		refresh: () => post<SwAiState>('/ai/refresh', {}),
+		clear: () => post<SwAiState>('/ai/clear', {}),
+		cancel: (requestId: string) => post<SwAiState>('/ai/cancel', { requestId }),
+		send: (req: unknown) => post<SwAiSendResponse>('/ai/send', req),
+		/** Live status. EventSource reconnects on its own, which is what we want
+		 *  when the dev server restarts under HMR. */
+		subscribe(onState: (s: SwAiState) => void) {
+			let es: EventSource | null = null;
+			try {
+				es = new EventSource(`${PREFIX}/ai/events`);
+				es.onmessage = (e) => {
+					try { onState(JSON.parse(e.data) as SwAiState); } catch { /* ignore a partial frame */ }
+				};
+			} catch { /* no EventSource — the panel still works via ai.state() */ }
+			return () => { try { es?.close(); } catch { /* ignore */ } };
+		}
 	}
 };
 
@@ -50,7 +80,10 @@ function boot(): void {
 	shadow.appendChild(style);
 	document.documentElement.appendChild(hostEl);
 
-	const panel = new Panel(shadow, serverHost);
+	// `stylewright({ ai: false })` stamps this flag; without it the Ask AI tab
+	// would render against routes that are not mounted.
+	const aiOff = !!(window as { __stylewright_no_ai__?: boolean }).__stylewright_no_ai__;
+	const panel = new Panel(shadow, aiOff ? { ...serverHost, ai: undefined } : serverHost);
 
 	/** Topmost app element under the pointer; null when over our own overlay UI. */
 	function elementUnder(e: MouseEvent): Element | null {
@@ -65,9 +98,12 @@ function boot(): void {
 	}
 
 	document.addEventListener('mousemove', (e) => {
-		if (!panel.isPicking()) return;
+		if (!panel.isPicking()) { panel.clearHover(); return; }
 		const node = elementUnder(e);
-		if (!node) return;
+		// null means the pointer is over our own overlay. Returning early used to
+		// leave the last page element highlighted, so the panel appeared to still be
+		// aiming at something while you were reading the panel itself.
+		if (!node) { panel.clearHover(); return; }
 		const file = resolveFile(node);
 		panel.hover(node.getBoundingClientRect(), tagLabel(node), file ? shortPath(file) : null);
 	}, true);
