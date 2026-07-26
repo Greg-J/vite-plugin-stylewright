@@ -93,10 +93,20 @@ export function guardBrowserRequest(req: Connect.IncomingMessage, mutating: bool
 	if (origin && !isSameOrigin(origin, host)) return { ok: false, status: 403, reason: 'bad_origin' };
 
 	if (mutating) {
-		// Browsers always attach Origin to a cross-origin write, so a missing one
-		// means a non-browser client (curl). Those must present the custom header
-		// like the overlay does, so a stray page can never write through us.
+		// A write must positively identify itself as same-origin. Origin is set by
+		// the browser and a page cannot forge it; Referer is the fallback for the
+		// handful of cases a browser omits Origin on a same-origin POST.
+		const src = origin || (req.headers.referer as string | undefined);
+		if (!src) return { ok: false, status: 403, reason: 'no_origin' };
+		if (!isSameOrigin(src, host)) return { ok: false, status: 403, reason: 'bad_origin' };
+
+		// Two independent barriers, because either alone has a known gap. The custom
+		// header cannot be set by a cross-site <form> or any no-preflight request;
+		// requiring JSON forces anything else into a CORS preflight the browser
+		// blocks. A `text/plain` form POST clears neither.
 		if (req.headers['x-stylewright'] !== '1') return { ok: false, status: 403, reason: 'missing_client_header' };
+		const ct = String(req.headers['content-type'] || '').toLowerCase();
+		if (!ct.includes('application/json')) return { ok: false, status: 403, reason: 'bad_content_type' };
 	}
 	return { ok: true };
 }

@@ -29,6 +29,11 @@ const PREFIX = '/__stylewright';
  *  the AI path stays out of this module (and out of the bundle when disabled). */
 export type AiHandler = (req: Connect.IncomingMessage, res: ServerResponse, path: string) => Promise<boolean>;
 
+// Path resolution moved to ./paths.ts, which repeats the containment check AFTER
+// realpath: the lexical check alone passes a symlink that lives inside the root
+// and points outside it. Re-exported so existing callers and tests keep working.
+export { resolveSvelteFile } from './paths.js';
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	const text = JSON.stringify(body);
 	res.statusCode = status;
@@ -55,13 +60,16 @@ function readBody(req: Connect.IncomingMessage): Promise<string> {
 			if (stopped) return;
 			const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
 			len += b.length;
-			if (len > MAX_BODY) { stopped = true; reject(new Error('body too large')); req.destroy(); return; }
+			// Stop buffering, but do NOT destroy the socket: the caller still has to
+			// send a status, and a reset connection tells the client nothing.
+			if (len > MAX_BODY) { stopped = true; reject(new Error('body too large')); return; }
 			parts.push(b);
 		});
-		req.on('end', () => { if (!stopped) resolve(Buffer.concat(parts).toString('utf8')); });
-		req.on('error', reject);
+		req.on('end', () => { if (!stopped) { stopped = true; resolve(Buffer.concat(parts).toString('utf8')); } });
+		req.on('error', (err) => { if (!stopped) { stopped = true; reject(err); } });
 	});
 }
+
 
 /**
  * Load the prebuilt overlay bundle that sits next to this file. Read fresh on
@@ -255,7 +263,7 @@ export function createStylewrightMiddleware(root: string, ai?: AiHandler): Conne
 				const source = await readFile(abs, 'utf8');
 				const result = applyStyleBlock(source, save.css);
 				if (result.changed) await writeFile(abs, result.code, 'utf8');
-				return sendJson(res, 200, { ok: true, changed: result.changed, invalid: result.invalid, droppedAtRules: result.droppedAtRules });
+				return sendJson(res, 200, { ok: true, changed: result.changed, invalid: result.invalid, droppedAtRules: result.droppedAtRules, unsafe: result.unsafe });
 			} catch (err) {
 				return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
 			}
@@ -292,7 +300,10 @@ export function createStylewrightMiddleware(root: string, ai?: AiHandler): Conne
 				return sendJson(res, 400, { ok: false, changed: false, matched: false, error: 'invalid json' });
 			}
 			const abs = resolveSvelteFile(root, edit?.file);
-			if (!abs || !edit.selector || !edit.prop) {
+			// value must be a real string (an undefined value used to serialize
+			// `prop: undefined` and break the compile) and must not carry `{ } ;`, which
+			// would close the rule and inject extra rules into source (TEST-1).
+			if (!abs || !edit.selector || !edit.prop || typeof edit.value !== 'string' || /[{};]/.test(edit.value)) {
 				return sendJson(res, 400, { ok: false, changed: false, matched: false, error: 'bad request' });
 			}
 			try {

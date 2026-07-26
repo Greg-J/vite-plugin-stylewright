@@ -14,11 +14,24 @@
     "inspector",
     "hmr"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Greg-J/vite-plugin-stylewright.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Greg-J/vite-plugin-stylewright/issues"
+  },
+  "homepage": "https://github.com/Greg-J/vite-plugin-stylewright#readme",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
   "main": "./dist/index.cjs",

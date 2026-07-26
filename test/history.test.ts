@@ -61,6 +61,21 @@ describe('History: global timeline across files', () => {
 	});
 });
 
+describe('History: content-based identity ignores source ids (COR-7)', () => {
+	// After a structural op, an undo re-keys the snapshot onto the renumbered source and
+	// reloads it — same CONTENT, different `id`s. History identity must treat that as
+	// unchanged (not a new edit), else redo breaks. (COR-7 replaced COR-2's history reset.)
+	const withId = (id: number, v: string): HistState<string> => ({ file: 'A', meta: 'A', rules: [{ sel: '.x', id, decls: [{ p: 'color', v }] }] });
+	it('a re-keyed reload (same content, new ids) is NOT recorded as a fresh edit', () => {
+		const h = new History<string>();
+		h.record(withId(0, 'red'), 0);    // load baseline
+		h.record(withId(0, 'blue'), 100); // edit
+		h.record(withId(5, 'blue'), 200); // post-structural reload: same content, id 0→5 → ignored
+		expect(val(h.undo())).toBe('red'); // one step back lands on the baseline, not 'blue' again
+		expect(h.canUndo()).toBe(false);
+	});
+});
+
 describe('History: coalescing + branch truncation', () => {
 	it('collapses rapid edits, keeps distinct ones', () => {
 		const h = new History<string>();
