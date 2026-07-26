@@ -8,6 +8,8 @@ A dev-only Vite plugin. Click an element on the page, tweak its CSS with live pr
   ✎  pick an element  →  edit its <style> rules  →  save  →  written to source + HMR
 ```
 
+<img src="docs/images/css-editor.png" alt="The Stylewright panel open beside a Svelte page, listing the parsed .btn rules from Button.svelte with editable values and colour swatches" width="900">
+
 **Status:** early alpha (`0.0.x`). The core round-trip is solid and unit-tested; the browser overlay is functional and evolving. Issues and PRs welcome.
 
 ---
@@ -57,6 +59,19 @@ Run your dev server — a **✎** button appears bottom-right.
 3. Edit a value — it previews live.
 4. Press **Enter** (or blur the field) — the value is written into that component's `.svelte` `<style>`, and Vite HMR repaints from source.
 
+<img src="docs/images/pick-element.png" alt="Pick mode: an element outlined on the page with a label reading the tag, its classes, and lib/Card.svelte" width="820">
+
+<sub>Pick mode names the element **and** the file that owns it before you commit to a click.</sub>
+
+<img src="docs/images/color-picker.png" alt="A colour value expanded into a picker with saturation field, hue and alpha sliders, hex input, and swatch rows headed IN USE and HISTORY" width="380">
+
+<sub>Colour values open a picker seeded with the palette the component already uses — no hunting for the hex you picked two edits ago.</sub>
+
+<img src="docs/images/settings.png" alt="The Settings screen: panel docking options, toggles for click-to-select, DOM tree and focus-the-selection, and an Agents section listing connected sessions and supported tools" width="360">
+
+<sub>The panel docks left, bottom, right or floating. **Focus the selection** — on by default —
+lists only the rules that style what you picked instead of the whole stylesheet.</sub>
+
 ## Ask AI
 
 Some changes aren't a CSS value — "make this a primary button with a loading spinner" is a
@@ -67,6 +82,11 @@ session, which makes the change under its own permission and diff flow.
 The overlay is an intent-capture surface. It never renders a conversation, never edits a
 file itself, and never picks a session for you.
 
+<img src="docs/images/ask-ai.png" alt="The Ask AI tab: the selected element pinned at the top, a composer holding a typed instruction, and a session chip reading 'no session linked'" width="360">
+
+<sub>The composer, with the target element pinned above it. The chip names the session the
+request will go to — hollow dot and "no session linked" until you link one.</sub>
+
 ### One-time setup
 
 Each agent registers an MCP server differently — Claude Code has a CLI command, Cline and
@@ -76,6 +96,11 @@ running from a checkout rather than an npm install you get an absolute path inst
 package name that would 404. Settings → Agents controls which tools are listed there.
 
 One entry covers every project — the MCP server finds whichever dev server is running.
+
+<img src="docs/images/agent-setup.png" alt="Settings → Claude Code: four numbered setup steps, the first showing a copyable 'claude mcp add stylewright' command with an absolute path filled in" width="400">
+
+<sub>Settings → Agents → **Setup**. The command is generated for your install, so a checkout
+gets an absolute path rather than an `npx` name that would 404.</sub>
 
 <details open>
 <summary><b>Claude Code</b></summary>
