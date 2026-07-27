@@ -219,8 +219,10 @@ export interface SwAiSession {
 	id: string;
 	/** User-facing name (STYLEWRIGHT_SESSION_NAME, else <basename(cwd)>-<n>). */
 	name: string;
-	/** From MCP initialize clientInfo.name, normalised. */
-	tool: 'Claude Code' | 'Cline' | string;
+	/** From MCP initialize clientInfo.name, normalised to a vendor label from
+	 *  shared/vendors.ts, or the raw client name when nothing matches. Named
+	 *  rather than enumerated here: the union drifted behind the table twice. */
+	tool: string;
 	/** Absolute cwd reported by the MCP process, shown tilde-shortened. */
 	cwd: string;
 	/** True when cwd is inside the Vite project root — foreign-project sessions are

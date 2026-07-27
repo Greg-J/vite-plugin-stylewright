@@ -76,8 +76,9 @@ lists only the rules that style what you picked instead of the whole stylesheet.
 
 Some changes aren't a CSS value — "make this a primary button with a loading spinner" is a
 markup change, a state, and a style. The **Ask AI** tab hands the selected element, its
-source file and its parsed style rules to **one deliberately linked** Claude Code or Cline
-session, which makes the change under its own permission and diff flow.
+source file and its parsed style rules to **one deliberately linked** agent session — Claude
+Code, Cline, OpenCode or Kimi Code — which makes the change under its own permission and diff
+flow.
 
 The overlay is an intent-capture surface. It never renders a conversation, never edits a
 file itself, and never picks a session for you.
@@ -89,8 +90,8 @@ request will go to — hollow dot and "no session linked" until you link one.</s
 
 ### One-time setup
 
-Each agent registers an MCP server differently — Claude Code has a CLI command, Cline and
-OpenCode are configured by file. **The overlay's setup screen shows the right one for
+Each agent registers an MCP server differently — Claude Code has a CLI command; Cline,
+OpenCode and Kimi Code are configured by file, in three different shapes. **The overlay's setup screen shows the right one for
 whichever you pick, with the path already filled in for your install**, so if you're
 running from a checkout rather than an npm install you get an absolute path instead of a
 package name that would 404. Settings → Agents controls which tools are listed there.
@@ -191,6 +192,49 @@ client's.
 
 </details>
 
+<details open>
+<summary><b>Kimi Code</b></summary>
+
+Kimi has no `mcp add` subcommand; it reads a JSON file in the Claude shape.
+
+1. **Add the MCP server in Kimi Code:**
+   Add to ~/.kimi-code/mcp.json (user-global), or .kimi-code/mcp.json inside the project:
+   ```json
+   {
+     "mcpServers": {
+       "stylewright": {
+         "command": "npx",
+         "args": [
+           "vite-plugin-stylewright",
+           "mcp"
+         ],
+         "toolTimeoutMs": 3600000,
+         "env": {
+           "STYLEWRIGHT_WATCH_MS": "3540000"
+         }
+       }
+     }
+   }
+   ```
+2. **Start Kimi Code in this project**
+3. **Tell it: watch for Stylewright edits**
+4. **Come back here and click Refresh**, then **Link** the session you want
+
+`toolTimeoutMs` is in **milliseconds**, like OpenCode's `timeout` and unlike Cline's seconds.
+Leave it out and the MCP SDK's own 60-second default applies, which means retyping step 3
+every minute.
+
+Unlike OpenCode, Kimi does **not** restart that timer when the server reports progress — it
+never asks the SDK to — so the heartbeat buys nothing and `toolTimeoutMs` is a hard ceiling on
+a single watch. That is why the value above is an hour rather than something smaller.
+
+Kimi also reads a project-root `.mcp.json` in the same shape, so if you already keep one for
+another tool, Stylewright is picked up from there with no second entry. The file above is
+Kimi's own, which is the safer place to paste when you do not want to change what other tools
+load.
+
+</details>
+
 Then select an element, switch to **Ask AI**, type an instruction, press Enter.
 
 ### Why step 3 exists
@@ -213,7 +257,7 @@ restarting the dev server does **not** do it.
 
 ### If a session doesn't appear
 
-The MCP server logs to stderr, which both Claude Code and Cline show in their MCP server
+The MCP server logs to stderr, which every supported agent shows in its MCP server
 panel. On success you'll see the project it connected to:
 
 ```
@@ -315,7 +359,7 @@ own session.
 - Edits the **first rule** matching a selector; descendant/complex selectors preview approximately.
 - One `<style>` block per component (the common case).
 - Preprocessor CSS (`lang="scss"`) is located and value-edits work, but structural rewrites are out of scope.
-- **Ask AI** targets Claude Code and Cline over MCP. Driving a local model directly is out
+- **Ask AI** targets Claude Code, Cline, OpenCode and Kimi Code over MCP. Driving a local model directly is out
   of scope: there would be no session to link, and the plugin would have to own the write
   and the diff approval — which is the one thing this design refuses to do.
 - One AI request in flight at a time.
