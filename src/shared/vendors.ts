@@ -75,7 +75,7 @@ export const VENDORS: AgentVendor[] = [
 		// Our config raises that to the slider maximum (1 hour) and matches the
 		// watch to it, so one arming lasts the session in practice.
 		configuredWatchMs: 3_540_000,
-		watchNote: 'Cline caps tool calls at its `timeout` setting — the config below raises it to an hour.',
+		watchNote: 'Cline caps tool calls at its `timeout` setting — the config above raises it to an hour.',
 		register: {
 			json: {
 				where: 'MCP Servers icon → Configure → Configure MCP Servers, then paste:',
@@ -147,7 +147,7 @@ export const VENDORS: AgentVendor[] = [
 		// watch rather than a soft one — Cline's semantics in OpenCode's unit,
 		// which is the worst pairing of the three and the reason this is generated
 		// rather than written by hand.
-		watchNote: 'Kimi Code kills a tool call at 60 seconds unless `toolTimeoutMs` says otherwise — the config below raises it to an hour.',
+		watchNote: 'Kimi Code kills a tool call at 60 seconds unless `toolTimeoutMs` says otherwise — the config above raises it to an hour.',
 		register: {
 			json: {
 				// Kimi also reads a project-root `.mcp.json` in the Claude shape,
