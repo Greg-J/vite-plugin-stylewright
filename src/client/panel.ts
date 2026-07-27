@@ -624,7 +624,7 @@ export class Panel {
 		if (this.restore) {
 			const r = this.restore;
 			this.restore = null;
-			void this.pick(r.file, r.meta);
+			void this.pick(r.file, r.meta, null, { restore: true });
 		}
 	}
 
@@ -930,7 +930,9 @@ export class Panel {
 		return this.drafts[this.draftKey(file, meta)] || '';
 	}
 
-	async pick(file: string | null, meta: PickMeta | null, el?: Element | null): Promise<void> {
+	/** `opts.restore` marks the pick replayed from the last session on mount rather
+	 *  than one the user just made — see focusPromptAfterPick. */
+	async pick(file: string | null, meta: PickMeta | null, el?: Element | null, opts?: { restore?: boolean }): Promise<void> {
 		// Commit any half-finished CSS edit FIRST. Declaration inputs persist through
 		// a 140ms blur timer, and with the picker always live a click on the next
 		// element re-picks well inside that window — which used to drop the edit.
@@ -951,11 +953,11 @@ export class Panel {
 			if (resp.error) { this.setState({ status: { kind: 'err', text: resp.error } }); return; }
 			// A component with no <style> block is still a legitimate AI target — the
 			// agent gets its file and markup — so the composer takes focus there too.
-			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); this.focusPromptAfterPick(); return; }
+			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); this.focusPromptAfterPick(opts); return; }
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
 			this.setState({ file, meta, rules, focusPick: this.state.focusPick, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
-			this.focusPromptAfterPick();
+			this.focusPromptAfterPick(opts);
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
 		}
@@ -2355,7 +2357,11 @@ export class Panel {
 	 *  change", so the caret belongs in the composer without a second click. Same
 	 *  guard as switchTab: not while a request is in flight, because then the log
 	 *  above the composer is what the pick was for. */
-	private focusPromptAfterPick(): void {
+	private focusPromptAfterPick(opts?: { restore?: boolean }): void {
+		// The pick replayed on mount is the last session being rebuilt, not someone
+		// targeting something — taking the caret there would mean every page reload
+		// grabs focus out of whatever the user was doing.
+		if (opts?.restore) return;
 		if (this.state.aiTab === 'ai' && this.state.file && !this.aiBusy()) this.focusPrompt();
 	}
 
@@ -2673,7 +2679,21 @@ export class Panel {
 			maxLength: SW_AI_LIMITS.prompt,
 			onChange: (e: Event) => this.setState({ prompt: (e.target as HTMLTextAreaElement).value }),
 			onFocus: () => { if (this.programmaticFocus) return; this.setState({ aiFocus: AI_PROMPT_KEY }); },
-			onBlur: () => { if (this.rebuilding || this.programmaticFocus) return; this.setState({ aiFocus: null }); },
+			// Deferred for the reason every declaration input defers: clearing focus
+			// state re-renders, the render is a microtask so it drains before mouseup,
+			// and the control you pressed is replaced between mousedown and mouseup —
+			// so no click ever fires and every button needed pressing twice, once to
+			// "leave" the box and once to actually hit it.
+			onBlur: () => {
+				if (this.rebuilding || this.programmaticFocus) return;
+				setTimeout(() => {
+					if (this.state.aiFocus !== AI_PROMPT_KEY) return; // something else claimed focus
+					const node = this.fieldByKey(AI_PROMPT_KEY);
+					let back = false;
+					try { back = !!node && this.shadow.activeElement === node; } catch { /* torn down */ }
+					if (!back) this.setState({ aiFocus: null });
+				}, 140);
+			},
 			onKeyDown: (e: KeyboardEvent) => {
 				if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void this.sendPrompt(); }
 			},
