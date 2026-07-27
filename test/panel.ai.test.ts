@@ -369,6 +369,17 @@ describe('setting up an agent lives in Settings and nowhere else', () => {
 		expect(cfg.enabled).toBe(true);
 	});
 
+	// Kimi reads the Claude-shaped `mcpServers` object, but names its timeout
+	// differently and in another unit — the one thing a hand-written config here
+	// would get wrong, since the neighbouring vendor spells it `timeout`.
+	it('offers Kimi the Claude-shaped object with its timeout in milliseconds', () => {
+		const cfg = JSON.parse(vendorConfigJson(vendorById('kimi')!, 'node /abs/dist/mcp.js mcp')).mcpServers.stylewright;
+		expect(cfg.command).toBe('node');
+		expect(cfg.args).toEqual(['/abs/dist/mcp.js', 'mcp']);
+		expect(cfg.toolTimeoutMs).toBe(3_600_000);
+		expect(cfg).not.toHaveProperty('timeout');
+	});
+
 	// Every client kills a tool call eventually, and a watch that outlives its
 	// client's limit is not patient — it is killed mid-call, which ends the agent's
 	// turn and makes the user retype "watch for Stylewright edits". So whatever
@@ -383,6 +394,8 @@ describe('setting up an agent lives in Settings and nowhere else', () => {
 		expect(Number(env.STYLEWRIGHT_WATCH_MS), 'config and watch budget disagree').toBe(v.configuredWatchMs);
 		// Only some vendors express a timeout; where one exists the watch ends inside it.
 		if (typeof entry.timeout === 'number') expect(v.configuredWatchMs).toBeLessThan(entry.timeout * 1000);
+		// Kimi spells it `toolTimeoutMs`, already in milliseconds.
+		if (typeof entry.toolTimeoutMs === 'number') expect(v.configuredWatchMs).toBeLessThan(entry.toolTimeoutMs);
 	});
 
 	it('states how long a watch really lasts rather than promising "once per session"', async () => {

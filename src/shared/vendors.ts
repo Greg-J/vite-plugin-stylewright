@@ -128,6 +128,48 @@ export const VENDORS: AgentVendor[] = [
 				})
 			}
 		}
+	},
+	{
+		id: 'kimi',
+		label: 'Kimi Code',
+		// `clientInfo.name` is the literal "kimi-code" (its MCP connection
+		// manager), which normalises to "kimicode"; bare "kimi" also catches the
+		// web client, which reports "kimi-code-web".
+		match: ['kimicode', 'kimi'],
+		// Read out of kimi 0.29.2, not inferred. Its MCP layer hands the SDK only
+		// `{ timeout, signal }`, so an unset `toolTimeoutMs` falls through to the
+		// SDK's own `?? 6e4` — a hard 60s.
+		safeWatchMs: 50_000,
+		configuredWatchMs: 3_540_000,
+		// The trap: Kimi never passes `resetTimeoutOnProgress`, so the SDK default
+		// of `false` applies and our 10s progress heartbeat does NOT restart the
+		// timer the way OpenCode's does. `toolTimeoutMs` is a hard ceiling on one
+		// watch rather than a soft one — Cline's semantics in OpenCode's unit,
+		// which is the worst pairing of the three and the reason this is generated
+		// rather than written by hand.
+		watchNote: 'Kimi Code kills a tool call at 60 seconds unless `toolTimeoutMs` says otherwise — the config below raises it to an hour.',
+		register: {
+			json: {
+				// Kimi also reads a project-root `.mcp.json` in the Claude shape,
+				// but we name its own file: that one is shared with other tools, so
+				// pasting into it changes what they load too.
+				where: 'Add to ~/.kimi-code/mcp.json (user-global), or .kimi-code/mcp.json inside the project:',
+				file: 'mcp.json',
+				build: (command, watchMs) => {
+					const [cmd, ...args] = splitCommand(command);
+					return {
+						mcpServers: {
+							[SERVER_NAME]: {
+								command: cmd, args,
+								// Milliseconds, unlike Cline's seconds.
+								toolTimeoutMs: watchMs + 60_000,
+								env: { STYLEWRIGHT_WATCH_MS: String(watchMs) }
+							}
+						}
+					};
+				}
+			}
+		}
 	}
 ];
 
