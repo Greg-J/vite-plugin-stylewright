@@ -779,6 +779,28 @@ describe('picking an element in the AI tab', () => {
 	});
 });
 
+// Blur used to clear focus state synchronously. setState renders on a microtask,
+// which drains before mouseup, so the control you pressed was rebuilt between
+// mousedown and mouseup and no click fired — every button in the panel needed
+// pressing twice whenever the caret was in the composer.
+describe('leaving the composer', () => {
+	it('does not eat the first click on another control', async () => {
+		const ctx = await openAi({ sessions: [session()], boundId: 's1', offline: false });
+		const box = ta(ctx.shadow)!;
+		box.focus();
+		await tick();
+		const styles = byText(ctx.shadow, AI_COPY.tabs.styles)!;
+		// The real sequence: mousedown blurs, then the click lands on that same node.
+		styles.dispatchEvent(new Event('mousedown', { bubbles: true }));
+		box.blur();
+		await tick();
+		expect(ctx.shadow.contains(styles), 'the control was rebuilt before its click').toBe(true);
+		styles.click();
+		await tick();
+		expect(ta(ctx.shadow)).toBeNull(); // the tab actually switched, on one click
+	});
+});
+
 describe('the CSS editor is not collateral damage', () => {
 	it('keeps the caret in the prompt box across the re-render every keystroke causes', async () => {
 		const { shadow } = await openAi({ sessions: [session()], boundId: 's1', offline: false });
