@@ -198,7 +198,7 @@ client's.
 Kimi has no `mcp add` subcommand; it reads a JSON file in the Claude shape.
 
 1. **Add the MCP server in Kimi Code:**
-   Add to ~/.kimi-code/mcp.json (user-global), or .kimi-code/mcp.json inside the project:
+   Create ~/.kimi-code/mcp.json (user-global), or .kimi-code/mcp.json in the project — Kimi ships with neither:
    ```json
    {
      "mcpServers": {

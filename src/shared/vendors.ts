@@ -153,7 +153,10 @@ export const VENDORS: AgentVendor[] = [
 				// Kimi also reads a project-root `.mcp.json` in the Claude shape,
 				// but we name its own file: that one is shared with other tools, so
 				// pasting into it changes what they load too.
-				where: 'Add to ~/.kimi-code/mcp.json (user-global), or .kimi-code/mcp.json inside the project:',
+				// "Add to" sent people looking for a file Kimi never ships: the
+				// user-global folder exists but holds no mcp.json, and the project
+				// one has to be made from scratch. Say create, not add.
+				where: 'Create ~/.kimi-code/mcp.json (user-global), or .kimi-code/mcp.json in the project — Kimi ships with neither:',
 				file: 'mcp.json',
 				build: (command, watchMs) => {
 					const [cmd, ...args] = splitCommand(command);
