@@ -10,7 +10,7 @@ A dev-only Vite plugin. Click an element on the page, tweak its CSS with live pr
 
 <img src="https://raw.githubusercontent.com/Greg-J/vite-plugin-stylewright/main/docs/images/css-editor.png" alt="The Stylewright panel open beside a Svelte page, listing the parsed .btn rules from Button.svelte with editable values and colour swatches" width="900">
 
-**Status:** early alpha (`0.0.x`). The core round-trip is solid and unit-tested; the browser overlay is functional and evolving. Issues and PRs welcome.
+**Status:** early alpha (`0.1.x`). The core round-trip is solid and unit-tested; the browser overlay is functional and evolving. Issues and PRs welcome.
 
 ---
 

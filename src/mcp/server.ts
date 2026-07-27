@@ -217,7 +217,7 @@ export class StylewrightMcpServer {
 			// Kept equal to package.json by a test — an agent's MCP panel showing a
 			// version the installed package never had makes "which build am I on"
 			// unanswerable at the one moment you need it answered.
-			serverInfo: { name: 'stylewright', version: '0.0.1' },
+			serverInfo: { name: 'stylewright', version: '0.1.0' },
 			instructions: INSTRUCTIONS
 		});
 
