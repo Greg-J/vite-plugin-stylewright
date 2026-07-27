@@ -205,6 +205,18 @@ describe('the built artifacts', () => {
 
 // Packaging guards: keep the npm metadata and the exports map publish-correct so a
 // future edit can't silently drop them before release (PRAC-1, PRAC-2).
+describe('the MCP server reports the version it actually is', () => {
+	// An agent's MCP panel showing a version the installed package never had makes
+	// "which build am I talking to" unanswerable — which is the exact question you
+	// ask when a rebuilt dist/mcp.js has not been picked up by a held server process.
+	it('matches package.json', () => {
+		const src = readFileSync(join(ROOT, 'src/mcp/server.ts'), 'utf8');
+		const found = src.match(/serverInfo:\s*\{[^}]*version:\s*'([^']+)'/);
+		expect(found, 'serverInfo version literal not found').toBeTruthy();
+		expect(found![1]).toBe(pkg.version);
+	});
+});
+
 describe('package.json — repo metadata (PRAC-1)', () => {
 	it('exposes repository / bugs / homepage so npm can link the source', () => {
 		expect(pkg.repository?.url).toContain('github.com/Greg-J/vite-plugin-stylewright');
