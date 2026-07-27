@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-stylewright",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Edit a Svelte component's CSS live in the browser and save it straight back into the .svelte <style> block. A dev-only Vite plugin.",
   "type": "module",
   "license": "MIT",
