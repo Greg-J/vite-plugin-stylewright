@@ -729,6 +729,56 @@ describe('the linked-but-not-watching gap', () => {
 	});
 });
 
+// Targeting an element in the AI tab is half a sentence: the other half is typed.
+// Making someone click into the box between the two is friction with no purpose.
+describe('picking an element in the AI tab', () => {
+	it('puts the caret in the composer', async () => {
+		const ctx = await openAi({ sessions: [session()], boundId: 's1', offline: false });
+		ta(ctx.shadow)!.blur();
+		await tick();
+		await ctx.panel.pick('src/Card.svelte', { ...META, fileLabel: 'Card.svelte', selectorLabel: '.card' });
+		await tick();
+		expect(ctx.shadow.activeElement).toBe(ta(ctx.shadow));
+	});
+
+	it('leaves focus alone while a request is in flight, when the log is the point', async () => {
+		const ctx = await openAi({
+			sessions: [session()], boundId: 's1', offline: false,
+			current: { id: 'r1', prompt: 'make it wider', status: 'working', files: [] }
+		} as unknown as SwAiState);
+		ta(ctx.shadow)?.blur();
+		await tick();
+		await ctx.panel.pick('src/Card.svelte', { ...META, fileLabel: 'Card.svelte' });
+		await tick();
+		expect(ctx.shadow.activeElement).not.toBe(ta(ctx.shadow));
+	});
+
+	// `current` outlives the work so the finished request keeps rendering its file
+	// list. Treating "there is a current" as "the agent is busy" meant the composer
+	// stopped taking focus for the rest of the session after the very first request —
+	// which is exactly when you go target the next thing and type.
+	it('still takes focus once an earlier request has finished', async () => {
+		const ctx = await openAi({
+			sessions: [session()], boundId: 's1', offline: false,
+			current: { id: 'r1', prompt: 'add a third button', status: 'done', files: [] }
+		} as unknown as SwAiState);
+		ta(ctx.shadow)?.blur();
+		await tick();
+		await ctx.panel.pick('src/Card.svelte', { ...META, fileLabel: 'Card.svelte' });
+		await tick();
+		expect(ctx.shadow.activeElement).toBe(ta(ctx.shadow));
+	});
+
+	it('does not steal focus for a pick made from the Styles tab', async () => {
+		const ctx = await openAi();
+		byText(ctx.shadow, AI_COPY.tabs.styles)!.click();
+		await tick();
+		await ctx.panel.pick('src/Card.svelte', { ...META, fileLabel: 'Card.svelte' });
+		await tick();
+		expect(ta(ctx.shadow)).toBeNull(); // composer isn't even mounted
+	});
+});
+
 describe('the CSS editor is not collateral damage', () => {
 	it('keeps the caret in the prompt box across the re-render every keystroke causes', async () => {
 		const { shadow } = await openAi({ sessions: [session()], boundId: 's1', offline: false });
