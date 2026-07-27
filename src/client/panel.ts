@@ -949,10 +949,13 @@ export class Panel {
 		try {
 			const resp = await this.host.loadRules(file);
 			if (resp.error) { this.setState({ status: { kind: 'err', text: resp.error } }); return; }
-			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); return; }
+			// A component with no <style> block is still a legitimate AI target — the
+			// agent gets its file and markup — so the composer takes focus there too.
+			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); this.focusPromptAfterPick(); return; }
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
 			this.setState({ file, meta, rules, focusPick: this.state.focusPick, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
+			this.focusPromptAfterPick();
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
 		}
@@ -2291,7 +2294,15 @@ export class Panel {
 		const b = this.boundSession();
 		return b ? b.name : '';
 	}
-	private aiStatus(): SwAiState['current'] | undefined { return this.state.ai?.current; }
+	/** Is a request actually in flight? `current` outlives the work — a finished
+	 *  request stays in state so its file list keeps rendering — so anything asking
+	 *  "is the agent busy" has to look at the status, not at whether `current` exists.
+	 *  Reading `current` alone meant the composer stopped taking focus for the rest of
+	 *  the session after the first request completed. */
+	private aiBusy(): boolean {
+		const c = this.state.ai?.current;
+		return !!c && c.status !== 'done' && c.status !== 'error';
+	}
 
 	private buildTabs(): SvgEl {
 		const tab = this.state.aiTab;
@@ -2332,12 +2343,20 @@ export class Panel {
 			// was open the last time.
 			settingsVendor: which === 'settings' ? null : this.state.settingsVendor
 		});
-		if (which === 'ai' && this.state.file && !this.aiStatus()) this.focusPrompt();
+		if (which === 'ai' && this.state.file && !this.aiBusy()) this.focusPrompt();
 	}
 
 	private focusPrompt(): void {
 		this.setState({ aiFocus: AI_PROMPT_KEY });
 		this.focusField(AI_PROMPT_KEY);
+	}
+
+	/** In the AI tab a pick is only the first half of "target this, then say what to
+	 *  change", so the caret belongs in the composer without a second click. Same
+	 *  guard as switchTab: not while a request is in flight, because then the log
+	 *  above the composer is what the pick was for. */
+	private focusPromptAfterPick(): void {
+		if (this.state.aiTab === 'ai' && this.state.file && !this.aiBusy()) this.focusPrompt();
 	}
 
 	private toggleBindingSurface(): void {
@@ -2643,7 +2662,7 @@ export class Panel {
 		// Telling someone to go ask it to watch, while the card above says that same
 		// session is running their task, reads as a bug in the panel and sends them
 		// to retype an instruction the agent does not need.
-		const busy = !!this.state.ai?.current && this.state.ai.current.status !== 'done' && this.state.ai.current.status !== 'error';
+		const busy = this.aiBusy();
 		const needsArming = linked && bound!.state !== 'watching' && !busy && !this.state.aiArmDismissed;
 
 		const textarea = el('textarea', {
