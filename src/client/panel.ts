@@ -522,6 +522,7 @@ export class Panel {
 	/** Task log is following the newest card (rather than parked on an old one). */
 	private logPinned = true;
 	private keyHandler: (e: KeyboardEvent) => void;
+	private shadowKeyGuard: (e: KeyboardEvent) => void;
 	private downHandler: (e: MouseEvent) => void;
 	private reanchorHandler: () => void;
 	private onResize: () => void;
@@ -612,6 +613,20 @@ export class Panel {
 				if (this.state.realW !== window.innerWidth) this.setState({ realW: window.innerWidth });
 			});
 		};
+		// Host-page isolation: a bare key pressed anywhere inside the overlay must
+		// not bubble out to the page. Sites bind document-level shortcuts (space
+		// toggles a row, arrows page a list) and shadow-DOM retargeting hides our
+		// fields from their target checks — without this, typing in the composer
+		// fires THEIR shortcuts and their preventDefault eats our characters.
+		// Modified keys and Escape still propagate: the panel's own shortcuts
+		// (the mod-combos above) live on window, and the host's Escape
+		// conventions keep working. stopPropagation only — the overlay never
+		// preventDefaults a key it isn't handling.
+		this.shadowKeyGuard = (e) => {
+			if (e.metaKey || e.ctrlKey || e.altKey || e.key === 'Escape') return;
+			if (e.key.length === 1 || e.key === 'Enter' || e.key.startsWith('Arrow')) e.stopPropagation();
+		};
+		this.rootEl.addEventListener('keydown', this.shadowKeyGuard);
 		window.addEventListener('keydown', this.keyHandler);
 		document.addEventListener('mousedown', this.downHandler);
 		window.addEventListener('resize', this.reanchorHandler);
@@ -655,6 +670,7 @@ export class Panel {
 	}
 
 	destroy(): void {
+		this.rootEl.removeEventListener('keydown', this.shadowKeyGuard);
 		window.removeEventListener('keydown', this.keyHandler);
 		document.removeEventListener('mousedown', this.downHandler);
 		window.removeEventListener('resize', this.reanchorHandler);

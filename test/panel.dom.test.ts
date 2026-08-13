@@ -608,3 +608,28 @@ describe('rekeyToCurrent — re-point a snapshot onto live source (COR-7)', () =
 		expect(rules.map((r) => r.id)).toEqual([0, 1]); // each matched its same-selector+media twin
 	});
 });
+
+
+describe('Panel: host-page key isolation', () => {
+	it('bare keys inside the overlay never reach the page; Escape and modified keys do', async () => {
+		const { shadow } = makePanel();
+		await tick();
+		const seen: string[] = [];
+		// A host page's document-level shortcut handler: it preventDefaults space,
+		// which is exactly how overlay typing used to lose characters.
+		const onKey = (e: KeyboardEvent) => { seen.push(e.key); if (e.key === ' ') e.preventDefault(); };
+		document.addEventListener('keydown', onKey);
+		try {
+			const inner = shadow.querySelector('*') as HTMLElement;
+			const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, composed: true, cancelable: true });
+			inner.dispatchEvent(space);
+			expect(seen).toEqual([]); // the page never sees it, so its preventDefault cannot eat the character
+			expect(space.defaultPrevented).toBe(false); // and the overlay never preventDefaults what it doesn't handle
+			inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, composed: true, cancelable: true }));
+			inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true, cancelable: true }));
+			expect(seen).toEqual(['z', 'Escape']); // the panel's window-level shortcuts and host Escape conventions keep working
+		} finally {
+			document.removeEventListener('keydown', onKey);
+		}
+	});
+});

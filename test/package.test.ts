@@ -179,7 +179,8 @@ describe('runtime dependencies stay honest', () => {
 	});
 
 	it('exposes the MCP bin the setup instructions tell people to run', () => {
-		expect(pkg.bin['vite-plugin-stylewright']).toBe('./dist/mcp.js');
+		// npm-normalized form (no './' prefix — 3f7a2dd dropped it to silence the publish warning).
+		expect(pkg.bin['vite-plugin-stylewright']).toBe('dist/mcp.js');
 		expect(pkg.files).toContain('dist');
 	});
 });
