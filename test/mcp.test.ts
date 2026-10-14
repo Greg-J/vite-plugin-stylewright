@@ -446,6 +446,23 @@ describe('an agent survives the dev server restarting under it', () => {
 		await h.server.shutdown();
 	}, 45_000);
 
+	it('registers once when a tool call lands while a background reconnect is pending', async () => {
+		const h = harness();
+		await h.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'claude-code' } } });
+		await new Promise((r) => setTimeout(r, 300));   // nothing to find: a reconnect is now scheduled (2 s)
+
+		// The dev server comes up and the agent's next tool call registers straight
+		// away — before the pending reconnect fires.
+		const late = await startServer('token-race');
+		await h.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'stylewright_list_pending', arguments: {} } });
+		expect(late.broker.state().sessions).toHaveLength(1);
+
+		await new Promise((r) => setTimeout(r, 2500));  // past the pending reconnect
+		expect(late.broker.state().sessions.filter((s) => s.state !== 'gone')).toHaveLength(1);
+
+		await h.server.shutdown();
+	}, 15_000);
+
 	it('keeps retrying when the dev server is not up yet at startup', async () => {
 		const h = harness();
 		await h.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'claude-code' } } });

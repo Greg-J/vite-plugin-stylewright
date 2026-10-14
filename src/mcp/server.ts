@@ -311,6 +311,9 @@ export class StylewrightMcpServer {
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			if (!this.running) return;
+			// A tool call may have registered us while this timer was pending;
+			// registering again would put a duplicate session in the overlay.
+			if (this.dev && this.sessionId) return;
 			void this.register(this.clientName).then(() => {
 				if (this.dev && this.sessionId) { this.reconnectDelay = 2_000; return; }
 				this.reconnectDelay = Math.min(this.reconnectDelay * 2, 15_000);
