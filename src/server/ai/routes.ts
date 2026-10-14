@@ -6,7 +6,8 @@
 //
 // Nothing here writes a file. The only filesystem touch is validating that the
 // component path an overlay claims to be editing really is a .svelte file inside
-// the project — so we never hand an agent a path we would not open ourselves.
+// the project (or, in plain-HTML mode, a configured CSS source) — so we never
+// hand an agent a path we would not open ourselves.
 
 import type { Connect } from 'vite';
 import type { ServerResponse } from 'node:http';
@@ -69,7 +70,7 @@ const num = (v: unknown): number | undefined => (typeof v === 'number' && Number
  * and these sizes — an allowlist, so a field we forgot to think about cannot
  * ride along into an agent's context window.
  */
-function sanitizeRequest(raw: unknown, root: string): { req: SwAiRequest } | { error: string } {
+function sanitizeRequest(raw: unknown, isSourceFile: (file: string) => boolean): { req: SwAiRequest } | { error: string } {
 	if (!raw || typeof raw !== 'object') return { error: 'bad_request' };
 	const r = raw as Record<string, any>;
 
@@ -77,7 +78,7 @@ function sanitizeRequest(raw: unknown, root: string): { req: SwAiRequest } | { e
 	if (!prompt) return { error: 'empty_prompt' };
 
 	const file = str(r.source?.file, 1024);
-	if (!resolveSvelteFile(root, file)) return { error: 'bad_file' };
+	if (!isSourceFile(file)) return { error: 'bad_file' };
 
 	const el = r.element || {};
 	const ctx = r.context || {};
@@ -138,6 +139,11 @@ export interface AiRoutesOptions {
 	broker: Broker;
 	root: string;
 	token: string;
+	/**
+	 * Which `source.file` values a request may name. Defaults to "a .svelte file
+	 * inside the root"; plain-HTML mode narrows it to the configured CSS sources.
+	 */
+	isSourceFile?: (file: string) => boolean;
 }
 
 /**
@@ -146,6 +152,7 @@ export interface AiRoutesOptions {
  */
 export function createAiRoutes(opts: AiRoutesOptions) {
 	const { broker, root, token } = opts;
+	const isSourceFile = opts.isSourceFile ?? ((file: string) => !!resolveSvelteFile(root, file));
 
 	return async function handleAi(req: Connect.IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
 		const method = req.method || 'GET';
@@ -197,7 +204,7 @@ export function createAiRoutes(opts: AiRoutesOptions) {
 
 		if (path === '/send' && method === 'POST') {
 			const raw = await readJson<unknown>(req);
-			const built = sanitizeRequest(raw, root);
+			const built = sanitizeRequest(raw, isSourceFile);
 			if ('error' in built) { sendJson(res, 400, { ok: false, reason: built.error }); return true; }
 			const r = broker.send(built.req);
 			if (!r.ok) { sendJson(res, 409, { ok: false, reason: r.reason }); return true; }

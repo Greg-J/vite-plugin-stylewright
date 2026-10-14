@@ -1,10 +1,6 @@
 import type { Plugin, ViteDevServer } from 'vite';
-import type { AddressInfo } from 'node:net';
 import { createStylewrightMiddleware, createHtmlInjectMiddleware } from './server/middleware.js';
-import { Broker } from './server/ai/broker.js';
-import { createAiRoutes } from './server/ai/routes.js';
-import { writeDevFile, newToken, type DevFileHandles } from './server/ai/devfile.js';
-import { resolveSetupCommand } from './server/ai/setupCommand.js';
+import { mountAi } from './server/ai/mount.js';
 
 export interface StylewrightOptions {
 	/**
@@ -57,48 +53,8 @@ export default function stylewright(options: StylewrightOptions = {}): Plugin {
 		configureServer(server: ViteDevServer) {
 			if (!enabled) return;
 
-			let handle: ReturnType<typeof createAiRoutes> | undefined;
-			let broker: Broker | undefined;
-			let devFile: DevFileHandles | undefined;
-
-			if (aiEnabled) {
-				broker = new Broker({ root, setup: resolveSetupCommand(root) });
-				const token = newToken();
-				handle = createAiRoutes({ broker, root, token });
-
-				// The lockfile can only be written once we know the port. Vite may
-				// already be listening by the time this hook runs (restart), so cover
-				// both paths and keep it idempotent.
-				const publish = (): void => {
-					if (devFile) return;
-					const addr = server.httpServer?.address() as AddressInfo | string | null;
-					if (!addr || typeof addr === 'string') return;
-					const host = addr.address === '::' || addr.address === '0.0.0.0' ? '127.0.0.1' : addr.address;
-					const bracket = host.includes(':') ? `[${host}]` : host;
-					devFile = writeDevFile({
-						version: 1,
-						pid: process.pid,
-						root,
-						origin: `http://${bracket}:${addr.port}`,
-						token,
-						startedAt: Date.now()
-					});
-				};
-				if (server.httpServer?.listening) publish();
-				server.httpServer?.once('listening', publish);
-
-				const teardown = (): void => {
-					devFile?.cleanup();
-					devFile = undefined;
-					broker?.dispose();
-				};
-				server.httpServer?.once('close', teardown);
-				// A hard exit (Ctrl-C) skips 'close', which would leave a stale lockfile
-				// pointing at a dead port with a live token in it.
-				process.once('exit', teardown);
-				process.once('SIGINT', teardown);
-				process.once('SIGTERM', teardown);
-			}
+			// Broker, token, routes and the registry entry the MCP server finds us by.
+			const handle = aiEnabled ? mountAi({ root, httpServer: server.httpServer }) : undefined;
 
 			// Inject the client by rewriting HTML responses (works under SvelteKit too,
 			// where transformIndexHtml is bypassed), then serve the API + bundle.

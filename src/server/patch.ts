@@ -36,11 +36,17 @@ function isKeyframesName(name: string): boolean {
 export function readRules(source: string): { hasStyle: boolean; rules: SwRule[] } {
 	const block = findStyleBlock(source);
 	if (!block) return { hasStyle: false, rules: [] };
+	return { hasStyle: true, rules: readRulesCss(block.css) };
+}
+
+/** The rules of a bare stylesheet — the `<style>` body, a `.css` file, or the CSS
+ *  inside a template literal. An unparseable sheet yields no rules. */
+export function readRulesCss(css: string): SwRule[] {
 	let root: postcss.Root;
 	try {
-		root = postcss.parse(block.css);
+		root = postcss.parse(css);
 	} catch {
-		return { hasStyle: true, rules: [] };
+		return [];
 	}
 	const rules: SwRule[] = [];
 	let ordinal = 0;
@@ -61,7 +67,7 @@ export function readRules(source: string): { hasStyle: boolean; rules: SwRule[] 
 			media: media.length ? media : undefined
 		});
 	});
-	return { hasStyle: true, rules };
+	return rules;
 }
 
 export interface ApplyResult {
@@ -145,12 +151,24 @@ export interface ApplyRulesOpts {
  * structural change the client re-fetches, because ids shift.
  */
 export function applyRules(source: string, rules: SwRule[], opts: ApplyRulesOpts = {}): ApplyRulesResult {
-	const empty = { code: source, changed: false, matched: 0, created: 0, removed: 0, renamed: 0 };
 	const block = findStyleBlock(source);
-	if (!block) return empty;
+	if (!block) return { code: source, changed: false, matched: 0, created: 0, removed: 0, renamed: 0 };
+	const r = applyRulesCss(block.css, rules, opts);
+	if (!r.changed) return { ...r, code: source };
+	const ms = new MagicString(source);
+	ms.overwrite(block.start, block.end, r.code);
+	return { ...r, code: ms.toString() };
+}
+
+/**
+ * applyRules on a bare stylesheet: `code` is the new CSS. Shared by the `.svelte`
+ * path above and the plain-HTML sources, so both patch rules the same way.
+ */
+export function applyRulesCss(css: string, rules: SwRule[], opts: ApplyRulesOpts = {}): ApplyRulesResult {
+	const empty = { code: css, changed: false, matched: 0, created: 0, removed: 0, renamed: 0 };
 	let root: postcss.Root;
 	try {
-		root = postcss.parse(block.css);
+		root = postcss.parse(css);
 	} catch {
 		return empty;
 	}
@@ -223,10 +241,8 @@ export function applyRules(source: string, rules: SwRule[], opts: ApplyRulesOpts
 
 	if (!changed) return { ...empty, matched };
 	const newCss = root.toString();
-	if (newCss === block.css) return { ...empty, matched };
-	const ms = new MagicString(source);
-	ms.overwrite(block.start, block.end, newCss);
-	return { code: ms.toString(), changed: true, matched, created, removed, renamed };
+	if (newCss === css) return { ...empty, matched };
+	return { code: newCss, changed: true, matched, created, removed, renamed };
 }
 
 /**

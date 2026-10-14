@@ -1,6 +1,7 @@
 // Path containment for everything the dev server is willing to read or write.
-// One validator, shared by the CSS routes and the AI path — a second one would
-// be a second place for a containment bug to hide.
+// One validator, shared by the CSS routes, the AI path and the plain-HTML
+// source allowlist — a second one would be a second place for a containment
+// bug to hide.
 
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
@@ -23,8 +24,10 @@ function within(abs: string, root: string): boolean {
 	return a === fold(nRoot) || a.startsWith(r);
 }
 
+const hasExt = (p: string, exts: readonly string[]): boolean => exts.some((e) => p.toLowerCase().endsWith(e));
+
 /**
- * Resolve a client-supplied path to an absolute `.svelte` file that really lives
+ * Resolve a path to an absolute file with one of `exts` that really lives
  * INSIDE the project root. Returns null for anything that escapes.
  *
  * The containment check runs TWICE: once on the lexical path (cheap, catches
@@ -35,14 +38,14 @@ function within(abs: string, root: string): boolean {
  * is realpath'd too, so a project reached through a symlinked parent (the
  * common `/tmp` -> `/private/tmp` case on macOS) still compares equal.
  */
-export function resolveSvelteFile(root: string, file: string): string | null {
+export function resolveContained(root: string, file: string, exts: readonly string[]): string | null {
 	if (!file || typeof file !== 'string') return null;
 	// A NUL byte truncates the path at the syscall boundary — reject outright.
 	if (file.includes('\0')) return null;
 
 	const abs = normalize(isAbsolute(file) ? file : join(root, file));
 	if (!within(abs, root)) return null;
-	if (!abs.toLowerCase().endsWith('.svelte')) return null;
+	if (!hasExt(abs, exts)) return null;
 	if (!existsSync(abs)) return null;
 
 	// Symlink containment. If either realpath fails, refuse rather than guess.
@@ -55,8 +58,13 @@ export function resolveSvelteFile(root: string, file: string): string | null {
 		return null;
 	}
 	if (!within(realFile, realRoot)) return null;
-	// A symlink to a non-.svelte file would otherwise slip through on the name.
-	if (!realFile.toLowerCase().endsWith('.svelte')) return null;
+	// A symlink to a file of another type would otherwise slip through on the name.
+	if (!hasExt(realFile, exts)) return null;
 
 	return abs;
+}
+
+/** A client-supplied path → an absolute `.svelte` file inside the root, or null. */
+export function resolveSvelteFile(root: string, file: string): string | null {
+	return resolveContained(root, file, ['.svelte']);
 }
