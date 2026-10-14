@@ -7,9 +7,11 @@
 // This module owns booting + the real element picker; the Panel owns the UI.
 
 import type { SwRule, SwRulesResponse, SwStyleSaveResponse, SwApplyResponse, SwAiState, SwAiSendResponse } from '../shared/protocol.js';
+import { PLAIN_FILE } from '../shared/protocol.js';
 import { Panel, type PanelHost } from './panel.js';
 import { describe, resolveFile, shortPath, tagLabel } from './inspect.js';
 import { ensureFonts, SHADOW_CSS } from './theme.js';
+import { isPlainMode, sourcesOnPage, applyLiveUpdates } from './plain.js';
 
 const PREFIX = '/__stylewright';
 
@@ -32,10 +34,20 @@ const serverHost: PanelHost = {
 	async loadRules(file) {
 		const res = await fetch(`${PREFIX}/rules?file=${encodeURIComponent(file)}`);
 		const data = (await res.json()) as SwRulesResponse;
+		// Plain-HTML mode serves every configured source; keep the ones this page
+		// actually includes, so a rule from another page's stylesheet never shows.
+		if (data.sources) {
+			const on = sourcesOnPage(data.sources);
+			const rules = data.rules.filter((r) => r.origin && on.has(r.origin));
+			return { hasStyle: rules.length > 0, rules, error: data.error };
+		}
 		return { hasStyle: data.hasStyle, rules: data.rules, error: data.error };
 	},
 	async applyRules(file: string, rules: SwRule[], opts?: { removeIds?: number[]; mediaRenames?: { id: number; params: string }[] }) {
-		return post<SwApplyResponse>('/apply', { file, rules, removeIds: opts?.removeIds, mediaRenames: opts?.mediaRenames });
+		const d = await post<SwApplyResponse>('/apply', { file, rules, removeIds: opts?.removeIds, mediaRenames: opts?.mediaRenames });
+		// No HMR in plain-HTML mode: put the saved CSS into the page ourselves.
+		if (d.updates?.length) d.livePatched = applyLiveUpdates(d.updates);
+		return d;
 	},
 	async saveCss(file, css) {
 		return post<SwStyleSaveResponse>('/style', { file, css });
@@ -69,6 +81,10 @@ const serverHost: PanelHost = {
 
 function boot(): void {
 	ensureFonts();
+	// Served by the proxy rather than Vite: no component metadata to resolve an
+	// element with, so every pick opens the page's configured CSS sources.
+	const plain = isPlainMode();
+	const fileOf = (node: Element): string | null => (plain ? PLAIN_FILE : resolveFile(node));
 
 	// Shadow host so the overlay UI is fully isolated from (and from) the app.
 	const hostEl = document.createElement('div');
@@ -104,7 +120,7 @@ function boot(): void {
 		// leave the last page element highlighted, so the panel appeared to still be
 		// aiming at something while you were reading the panel itself.
 		if (!node) { panel.clearHover(); return; }
-		const file = resolveFile(node);
+		const file = plain ? null : resolveFile(node);
 		panel.hover(node.getBoundingClientRect(), tagLabel(node), file ? shortPath(file) : null);
 	}, true);
 
@@ -114,7 +130,7 @@ function boot(): void {
 		if (!node) return;
 		e.preventDefault();
 		e.stopPropagation();
-		const file = resolveFile(node);
+		const file = fileOf(node);
 		const meta = describe(node); // fills fileLabel from the resolved component
 		void panel.pick(file, meta, node);
 	}, true);

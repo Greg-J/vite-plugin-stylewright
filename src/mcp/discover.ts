@@ -116,6 +116,8 @@ export async function discover(cwd: string): Promise<Discovered | null> {
 export const NO_SERVER_MESSAGE =
 	'No running Vite dev server with Stylewright was found for this project.\n' +
 	'  • Start it with `npm run dev` (or your project\'s dev script), then call this tool again.\n' +
+	'  • Not a Svelte + Vite app? Start the Stylewright proxy in front of it (see this server\'s\n' +
+	'    instructions, or `proxy --help`) with --root set to this project.\n' +
 	'  • If the dev server runs in a container or under another user, set STYLEWRIGHT_URL and\n' +
 	'    STYLEWRIGHT_TOKEN (both are in ~/.stylewright/servers/ on the machine running Vite).';
 

@@ -15,6 +15,8 @@ export interface Rule {
 	id?: number;
 	/** Enclosing @media/at-rule chain, outermost first — for grouping + labels. */
 	media?: SwAtRule[];
+	/** Plain-HTML mode: the configured source this rule lives in (SwRule.origin). */
+	origin?: string;
 }
 
 /** Wire model (GET /rules) → editor model. */
@@ -23,7 +25,8 @@ export function fromServerRules(rules: SwRule[]): Rule[] {
 		sel: r.selector,
 		decls: r.decls.map((d) => ({ p: d.prop, v: d.value })),
 		id: r.id,
-		media: r.media
+		media: r.media,
+		origin: r.origin
 	}));
 }
 
@@ -34,7 +37,8 @@ export function toServerRules(rules: Rule[]): SwRule[] {
 		id: r.id,
 		selector: r.sel,
 		decls: r.decls.map((d) => ({ prop: d.p, value: d.v })),
-		media: r.media
+		media: r.media,
+		origin: r.origin
 	}));
 }
 
@@ -57,5 +61,5 @@ export function serializeRules(rules: Rule[]): string {
 
 /** Deep clone for undo/redo snapshots (structuredClone-free, JSON is enough here). */
 export function cloneRules(rules: Rule[]): Rule[] {
-	return rules.map((r) => ({ sel: r.sel, id: r.id, media: r.media, decls: r.decls.map((d) => ({ p: d.p, v: d.v })) }));
+	return rules.map((r) => ({ sel: r.sel, id: r.id, media: r.media, origin: r.origin, decls: r.decls.map((d) => ({ p: d.p, v: d.v })) }));
 }

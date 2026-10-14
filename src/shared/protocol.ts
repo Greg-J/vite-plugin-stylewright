@@ -30,6 +30,32 @@ export interface SwRule {
 	 * overrides and evaluate which apply at the current viewport.
 	 */
 	media?: SwAtRule[];
+	/**
+	 * Plain-HTML mode only: the CSS source this rule came from, as configured with
+	 * `--css` — `path/to/file.js#NAME` for a template literal, `path/to/file.css`
+	 * for a stylesheet. A rule with no `id` (a create) must carry one.
+	 */
+	origin?: string;
+}
+
+/**
+ * The `file` the overlay asks for in plain-HTML mode. There is no component to
+ * resolve an element to, so every pick loads the page's configured CSS sources
+ * and the editor narrows them to the rules that match the element.
+ */
+export const PLAIN_FILE = '@page';
+
+/** One configured CSS source, as `GET /rules?file=@page` reports it. */
+export interface SwSource {
+	/** The `--css` entry: `path#NAME` or `path.css`. Matches `SwRule.origin`. */
+	key: string;
+	/** Project-relative file path. */
+	file: string;
+	/** The CSS as the page receives it (escapes processed). The overlay uses it to
+	 *  tell which sources this page actually includes. */
+	css: string;
+	/** Why this source cannot be read right now; it contributes no rules. */
+	error?: string;
 }
 
 /** Response to `GET /__stylewright/rules?file=<path>`. */
@@ -38,6 +64,9 @@ export interface SwRulesResponse {
 	hasStyle: boolean;
 	rules: SwRule[];
 	error?: string;
+	/** Plain-HTML mode: every configured source, so the overlay can filter to the
+	 *  ones on this page. */
+	sources?: SwSource[];
 }
 
 /** Body of `POST /__stylewright/edit`. */
@@ -128,6 +157,14 @@ export interface SwApplyResponse {
 	removed?: number;
 	renamed?: number;
 	error?: string;
+	/**
+	 * Plain-HTML mode: each source the save rewrote, as its CSS before and after.
+	 * There is no HMR, so the overlay swaps `before` for `after` in the page's own
+	 * <style> to show the change without a reload.
+	 */
+	updates?: { key: string; before: string; after: string }[];
+	/** Set by the overlay host, not the server: whether `updates` reached the page. */
+	livePatched?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +193,9 @@ export interface SwAiRequest {
 	prompt: string;
 
 	source: {
-		/** Project-relative .svelte file from __svelte_meta (validated server-side). */
+		/** Project-relative .svelte file from __svelte_meta — or, in plain-HTML mode,
+		 *  the configured CSS source holding the element's most specific rule.
+		 *  Validated server-side either way. */
 		file: string;
 		/** Basename without extension, e.g. "Button". */
 		componentName?: string;

@@ -20,10 +20,11 @@ import type {
 	SwRule, SwAtRule, SwStyleSaveResponse, SwApplyResponse,
 	SwAiState, SwAiSession, SwAiRequest, SwAiSendResponse, SwAiTask
 } from '../shared/protocol.js';
-import { SW_AI_LIMITS } from '../shared/protocol.js';
+import { SW_AI_LIMITS, PLAIN_FILE } from '../shared/protocol.js';
 import { usefulCwd } from '../shared/cwd.js';
 import { VENDORS, DEFAULT_VENDOR, vendorById, type AgentVendor } from '../shared/vendors.js';
 import { AI_COPY, fill } from './aiCopy.js';
+import { isPlainMode } from './plain.js';
 import { describe, resolveFile, shortPath, tagLabel, buildDomTree, pathPrefixes } from './inspect.js';
 import type { PickMeta, DomNode } from './inspect.js';
 export type { PickMeta } from './inspect.js';
@@ -202,7 +203,9 @@ const normSel = (s: string): string => s.replace(/\s+/g, ' ').trim();
  *  gets no id (→ create); a current rule absent from the snapshot goes in removeIds.
  *  Duplicate (selector+@media) rules are matched positionally within their group. */
 export function rekeyToCurrent(snapshot: Rule[], current: Rule[]): { rules: Rule[]; removeIds: number[] } {
-	const sig = (r: Rule): string => normSel(r.sel) + '' + (r.media || []).map((m) => m.name + ' ' + String(m.params).trim()).join('');
+	// The source is part of a rule's identity in plain-HTML mode: the same selector
+	// in two files is two rules, and undo must never move one into the other.
+	const sig = (r: Rule): string => (r.origin || '') + '' + normSel(r.sel) + '' + (r.media || []).map((m) => m.name + ' ' + String(m.params).trim()).join('');
 	const pool = new Map<string, Rule[]>();
 	for (const c of current) { const k = sig(c); const a = pool.get(k); if (a) a.push(c); else pool.set(k, [c]); }
 	const matched = new Set<Rule>();
@@ -929,6 +932,27 @@ export class Panel {
 		});
 		return set;
 	}
+	/** Plain-HTML mode: the source holding the rule that styles the picked element
+	 *  most directly — the last one in source order that matches the element itself
+	 *  (later wins at equal specificity), else the first focused rule. This is the
+	 *  file the breadcrumb names and the one Ask AI hands the agent. */
+	private primaryOrigin(rules: Rule[]): string | null {
+		const target = this.pickedEl;
+		let best: string | null = null;
+		if (target) {
+			rules.forEach((r) => {
+				const sel = this.matchableSelector(r.sel);
+				if (!sel || !r.origin) return;
+				try { if (target.matches(sel)) best = r.origin; } catch { /* invalid selector */ }
+			});
+		}
+		if (best) return best;
+		// No element (a pick restored from the last session) means no evidence:
+		// return nothing rather than the page's first rule, so the label the pick
+		// was saved with stands.
+		if (!this.pickedRis) return null;
+		return rules[[...this.pickedRis][0]]?.origin || null;
+	}
 	private elLabel(elx: Element): string {
 		const c = (elx.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean)[0];
 		return c ? '.' + c : elx.tagName.toLowerCase();
@@ -972,7 +996,9 @@ export class Panel {
 			if (!resp.hasStyle) { this.setState({ view: 'no-style', file, meta, rules: [] }); this.focusPromptAfterPick(opts); return; }
 			const rules = fromServerRules(resp.rules);
 			this.computeFocus(rules);
-			this.setState({ file, meta, rules, focusPick: this.state.focusPick, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
+			const origin = file === PLAIN_FILE ? this.primaryOrigin(rules) : null;
+			const label = origin && meta ? { ...meta, fileLabel: shortPath(origin.split('#')[0]) } : meta;
+			this.setState({ file, meta: label, rules, focusPick: this.state.focusPick, status: { kind: 'idle', text: 'Ready · edits write to source on commit' } });
 			this.focusPromptAfterPick(opts);
 		} catch (err) {
 			this.setState({ status: { kind: 'err', text: 'Failed to load: ' + String(err) } });
@@ -1015,7 +1041,7 @@ export class Panel {
 		if (!file || !base) return;
 		const { minW } = this.breakpoints();
 		const w = minW.length ? minW[minW.length - 1] : 768;
-		const newRule: SwRule = { selector: base.sel, media: [{ name: 'media', params: `(min-width: ${w}px)` }], decls: [] };
+		const newRule: SwRule = { selector: base.sel, media: [{ name: 'media', params: `(min-width: ${w}px)` }], decls: [], origin: base.origin };
 		this.setState({ status: { kind: 'saving', text: 'Adding @media override …' } });
 		try {
 			const d = await this.host.applyRules(file, toServerRules(this.state.rules).concat([newRule]));
@@ -1138,6 +1164,7 @@ export class Panel {
 			// leaving @media / keyframes / comments intact.
 			const d = await this.host.applyRules(file, toServerRules(rules));
 			if (!d.ok) this.setState({ status: { kind: 'err', text: d.error || 'Save failed' } });
+			else if (d.changed && d.updates) this.setState({ status: { kind: 'ok', text: d.livePatched ? 'Saved · page updated' : 'Saved · reload the page to see it' } });
 			else if (d.changed) this.setState({ status: { kind: 'ok', text: 'Saved · HMR repainted from source' } });
 			else this.setState({ status: { kind: 'idle', text: 'No change' } });
 		} catch (err) {
@@ -1822,6 +1849,7 @@ export class Panel {
 			el('span', { style: { color: C_SEL } }, rule.sel),
 			el('span', { style: { color: C_PUNCT } }, ' {'),
 			el('span', { style: { flex: '1' } }),
+			rule.origin ? el('span', { title: rule.origin, style: { color: C_FONT, opacity: 0.7, fontSize: '9.5px', fontFamily: '"IBM Plex Mono",monospace', alignSelf: 'center' } }, rule.origin.split('#')[0].split('/').pop()) : null,
 			hasMedia ? this.removeRuleBtn(ri) : null);
 	}
 	/** Inline editor for a rule's @media min-width (Enter/blur commits, Esc cancels). */
@@ -2264,6 +2292,13 @@ export class Panel {
 	}
 	private buildNoStyle(): SvgEl {
 		const m = this.state.meta;
+		if (this.state.file === PLAIN_FILE) {
+			return el('div', { style: 'flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:34px 28px;text-align:center;' },
+				el('div', { style: 'width:46px;height:46px;border-radius:12px;background:#1c1c22;border:1px solid rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;color:#7e7e8c;font-family:"IBM Plex Mono",monospace;font-size:18px;' }, '{ }'),
+				el('div', { style: 'font-size:14px;font-weight:600;color:#ececf1;white-space:nowrap;' }, 'No editable CSS on this page'),
+				el('div', { style: 'font-size:12.5px;line-height:1.6;color:#9a9aa6;max-width:260px;' },
+					'None of the CSS sources the proxy was started with (--css) is on this page as it is now. If one was just edited on disk, reload the page.'));
+		}
 		return el('div', { style: 'flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:34px 28px;text-align:center;' },
 			el('div', { style: 'width:46px;height:46px;border-radius:12px;background:#1c1c22;border:1px solid rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;color:#7e7e8c;font-family:"IBM Plex Mono",monospace;font-size:18px;' }, '{ }'),
 			el('div', { style: 'font-size:14px;font-weight:600;color:#ececf1;white-space:nowrap;' }, 'No <style> block yet'),
@@ -2627,7 +2662,7 @@ export class Panel {
 				case 'sending': return { tone: '#9a9aa6', label: C.sendingNote, icon: this.spinner() };
 				case 'working': return { tone: '#c4baff', label: fill(C.workingNote, { name }), icon: this.spinner() };
 				case 'needs_input': return { tone: '#e8c98a', label: fill(C.needsNote, { name }), icon: dot('#e8c98a') };
-				case 'done': return { tone: '#8fe8c0', label: fill(C.doneNote, { n: (t.filesTouched || []).length }), icon: dot('#34d399', true) };
+				case 'done': return { tone: '#8fe8c0', label: fill(isPlainMode() ? C.doneNotePlain : C.doneNote, { n: (t.filesTouched || []).length }), icon: dot('#34d399', true) };
 				default: return { tone: '#f87171', label: C.errorNote, icon: dot('#f87171') };
 			}
 		})();
@@ -2937,14 +2972,20 @@ export class Panel {
 	 * disagree about what "this element" means.
 	 */
 	private buildAiRequest(): SwAiRequest | null {
-		const file = this.state.file;
 		const node = this.pickedEl;
+		// Plain-HTML mode has no component file: name the source holding the
+		// element's most specific rule, and send the rules that style it rather than
+		// the whole page's stylesheet (far past the agent payload limit).
+		const plain = this.state.file === PLAIN_FILE;
+		const origin = plain ? this.primaryOrigin(this.state.rules) : null;
+		const file = plain ? (origin ? origin.split('#')[0] : null) : this.state.file;
 		if (!file) return null;
+		const styleRules = plain ? this.focusedRulesFirst() : this.state.rules;
 		const m = this.state.meta;
 		const tagName = node ? node.tagName.toLowerCase() : (m ? m.tag.replace(/[<>]/g, '').split(' ')[0] : '');
 		const classList = node ? (node.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean) : [];
 		const rect = node ? node.getBoundingClientRect() : null;
-		const base = (file.replace(/\\/g, '/').split('/').pop() || '').replace(/\.svelte$/i, '');
+		const base = plain ? '' : (file.replace(/\\/g, '/').split('/').pop() || '').replace(/\.svelte$/i, '');
 		return {
 			id: uuid(),
 			createdAt: Date.now(),
@@ -2964,7 +3005,7 @@ export class Panel {
 				parentTag: node && node.parentElement ? tagLabel(node.parentElement) : undefined,
 				// Already fetched for the editor — handing it over costs nothing and
 				// removes most "the agent rewrote the wrong selector" failures.
-				styleRules: toServerRules(this.state.rules).slice(0, SW_AI_LIMITS.styleRules),
+				styleRules: toServerRules(styleRules).slice(0, SW_AI_LIMITS.styleRules),
 				computed: node ? interestingComputed(node) : undefined
 			},
 			page: {
@@ -2977,6 +3018,25 @@ export class Panel {
 		};
 	}
 
+	/** Plain-HTML mode's styleRules for Ask AI: the rules matching the picked
+	 *  element itself, then those styling its contents. */
+	private focusedRulesFirst(): Rule[] {
+		const rules = this.state.rules;
+		const ris = this.pickedRis;
+		if (!ris) return rules;
+		const target = this.pickedEl;
+		const own: Rule[] = [];
+		const inside: Rule[] = [];
+		for (const ri of ris) {
+			const r = rules[ri];
+			const sel = this.matchableSelector(r.sel);
+			let self = false;
+			try { self = !!(target && sel && target.matches(sel)); } catch { /* invalid selector */ }
+			(self ? own : inside).push(r);
+		}
+		return own.concat(inside);
+	}
+
 	/** A short, readable path from the component's root to this node. */
 	private cssPathWithin(node: Element | null): string {
 		if (!node) return this.state.meta ? this.state.meta.selectorLabel : '';
@@ -2985,7 +3045,8 @@ export class Panel {
 		for (let i = 0; cur && i < 4; i++) {
 			parts.unshift(this.elLabel(cur));
 			cur = cur.parentElement;
-			if (cur && resolveFile(cur) !== this.state.file) break;
+			// A page has no component boundary: stop below <body>, which says nothing.
+			if (cur && (this.state.file === PLAIN_FILE ? cur === document.body || cur === document.documentElement : resolveFile(cur) !== this.state.file)) break;
 		}
 		return parts.join(' > ');
 	}
@@ -3127,7 +3188,7 @@ export class Panel {
 		if (node.classes.length) parts.push(el('span', { style: { color: C_CLS } }, '.' + node.classes.join('.')));
 		if (node.ownsFile && node.fileLabel) parts.push(el('span', { title: node.file || '', style: { marginLeft: 6, color: C_FONT, opacity: 0.7, fontSize: '9.5px', whiteSpace: 'nowrap' } }, node.fileLabel));
 		return el('div', {
-			onClick: () => { void this.pick(node.file, describe(node.el), node.el); },
+			onClick: () => { void this.pick(node.file ?? (isPlainMode() ? PLAIN_FILE : null), describe(node.el), node.el); },
 			onMouseEnter: (e: MouseEvent) => { this.previewEl(node.el); (e.currentTarget as HTMLElement).style.background = selected ? 'rgba(139,124,246,.28)' : 'rgba(255,255,255,.05)'; },
 			onMouseLeave: (e: MouseEvent) => { this.clearPreview(); (e.currentTarget as HTMLElement).style.background = selected ? 'rgba(139,124,246,.2)' : 'transparent'; },
 			style: { display: 'flex', alignItems: 'center', gap: 4, padding: '1px 8px 1px ' + indent + 'px', whiteSpace: 'nowrap', cursor: 'pointer', borderRadius: 4, background: selected ? 'rgba(139,124,246,.2)' : 'transparent' }

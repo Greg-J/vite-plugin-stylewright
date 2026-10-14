@@ -167,6 +167,8 @@ export const AI_COPY = {
 		doneSub: 'Vite HMR repainted the component from source.',
 		/** {n} */
 		doneNote: '{n} files written · HMR ok',
+		/** {n} — served by the proxy: there is no HMR, the agent's write shows on reload. */
+		doneNotePlain: '{n} files written · reload to see it',
 
 		error: 'Couldn’t reach {name}',
 		errorSub: 'The session stopped responding. Re-link it, then send again.',

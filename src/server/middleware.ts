@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { readRules, applyEdit, applyRules, readStyle, applyStyleBlock } from './patch.js';
 import { resolveSvelteFile } from './paths.js';
 import { guardBrowserRequest, refuse } from './guard.js';
+import type { PlainSources } from './sources.js';
 import type {
 	SwRulesResponse,
 	SwEditRequest,
@@ -77,7 +78,7 @@ function readBody(req: Connect.IncomingMessage): Promise<string> {
  * refresh — no dev-server restart needed while iterating. The read is a single
  * small file, only on full page loads, so the cost is negligible.
  */
-function loadClient(): string {
+export function loadClient(): string {
 	const candidates = [
 		fileURLToPath(new URL('./client.global.js', import.meta.url)),
 		fileURLToPath(new URL('../dist/client.global.js', import.meta.url))
@@ -178,7 +179,12 @@ export function createHtmlInjectMiddleware(): Connect.NextHandleFunction {
 	};
 }
 
-export function createStylewrightMiddleware(root: string, ai?: AiHandler): Connect.NextHandleFunction {
+/**
+ * `plain` switches the CSS routes to plain-HTML mode: `/rules` and `/apply` serve
+ * the configured CSS sources (see sources.ts) instead of a `.svelte` <style>, and
+ * the `.svelte`-only routes are not mounted. The guards are the same either way.
+ */
+export function createStylewrightMiddleware(root: string, ai?: AiHandler, plain?: PlainSources): Connect.NextHandleFunction {
 	return async (req, res, next) => {
 		const url = req.url || '';
 		if (!url.startsWith(PREFIX)) return next();
@@ -205,6 +211,28 @@ export function createStylewrightMiddleware(root: string, ai?: AiHandler): Conne
 			res.setHeader('cache-control', 'no-store');
 			res.end(loadClient());
 			return;
+		}
+
+		if (plain) {
+			if (req.method === 'GET' && url.startsWith(`${PREFIX}/rules`)) return sendJson(res, 200, await plain.rules());
+			if (req.method === 'POST' && url.startsWith(`${PREFIX}/apply`)) {
+				let body: SwApplyRequest;
+				try {
+					body = JSON.parse(await readBody(req));
+				} catch {
+					return sendJson(res, 400, { ok: false, changed: false, error: 'invalid json' });
+				}
+				try {
+					const r = await plain.apply(body);
+					return sendJson(res, r.status, r.body);
+				} catch (err) {
+					return sendJson(res, 500, { ok: false, changed: false, error: String(err) });
+				}
+			}
+			if (url.startsWith(`${PREFIX}/style`) || url.startsWith(`${PREFIX}/edit`)) {
+				return sendJson(res, 404, { ok: false, error: 'not available in plain-HTML mode' });
+			}
+			return next();
 		}
 
 		// --- list a component's rules ---

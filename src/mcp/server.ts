@@ -13,6 +13,7 @@ import { basename } from 'node:path';
 import { discover, NO_SERVER_MESSAGE, ambiguousMessage, AmbiguousServers, type Discovered } from './discover.js';
 import { vendorForClient, VENDORS } from '../shared/vendors.js';
 import type { SwAgentClaimResponse, SwAiRequest } from '../shared/protocol.js';
+import { cliCommand } from '../shared/cli.js';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const DEFAULT_PROTOCOL = PROTOCOL_VERSIONS[0];
@@ -101,12 +102,26 @@ const WATCH_DESCRIPTION =
 	'touched. If you must ask the user something, call stylewright_report with status "needs_input" ' +
 	'FIRST, then ask in this session.';
 
-const INSTRUCTIONS =
-	'Stylewright connects this session to the user\'s running app in the browser. When they select an ' +
-	'element in the Stylewright overlay and type an instruction, it arrives here as a request.\n\n' +
-	'To receive requests you must call stylewright_watch — nothing is pushed to you. If the user says ' +
-	'anything like "watch for Stylewright edits", call stylewright_watch immediately and keep the loop ' +
-	'going: claim → edit → stylewright_report(done) → claim again.';
+/**
+ * Read by every session that registers this server, so the proxy paragraph is
+ * how an agent learns Stylewright works on apps that are not Svelte + Vite —
+ * with the command that runs on THIS machine (a checkout has no npx name yet).
+ */
+export function serverInstructions(cmd: string = cliCommand(import.meta.url)): string {
+	return (
+		'Stylewright connects this session to the user\'s running app in the browser. When they select an ' +
+		'element in the Stylewright overlay and type an instruction, it arrives here as a request.\n\n' +
+		'To receive requests you must call stylewright_watch — nothing is pushed to you. If the user says ' +
+		'anything like "watch for Stylewright edits", call stylewright_watch immediately and keep the loop ' +
+		'going: claim → edit → stylewright_report(done) → claim again.\n\n' +
+		'Svelte + Vite apps get the overlay from the Vite plugin. For any other app that serves HTML ' +
+		'(server-rendered pages, a Worker under wrangler dev), start the app\'s own dev server, then run ' +
+		`\`${cmd} proxy --target <app url> --root <project dir> --css <source> ...\` in the background and ` +
+		'give the user the URL it prints. Each --css is a file the overlay may edit: path/styles.css, or ' +
+		'path/file.js#NAME for CSS held in a `const NAME = `...`` template literal (no ${...} inside). ' +
+		`Run \`${cmd} proxy --help\` for details.`
+	);
+}
 
 export class StylewrightMcpServer {
 	private dev: Discovered | null = null;
@@ -218,7 +233,7 @@ export class StylewrightMcpServer {
 			// version the installed package never had makes "which build am I on"
 			// unanswerable at the one moment you need it answered.
 			serverInfo: { name: 'stylewright', version: '0.1.0' },
-			instructions: INSTRUCTIONS
+			instructions: serverInstructions()
 		});
 
 		// Register with the dev server AFTER replying, so a slow or absent dev
@@ -624,6 +639,15 @@ export function renderRequest(req: SwAiRequest): string {
 		`component's real parsed CSS (with its @media chain), so use it to target the exact rule`,
 		`rather than inferring one. When you are done, call stylewright_report with`,
 		`requestId "${req.id}", status "done", and the files you touched.`,
+		...(req.context.styleRules?.some((r) => r.origin)
+			? [
+				``,
+				`This page is server-rendered, so ${req.source.file} is where the matching CSS lives, not`,
+				`the markup. Each style rule's "origin" names its source (file#NAME is a template literal`,
+				`in that file). For a markup change, find the template that renders this element by`,
+				`searching the project for its classes.`
+			]
+			: []),
 		``,
 		'```json',
 		JSON.stringify(req, null, 2),

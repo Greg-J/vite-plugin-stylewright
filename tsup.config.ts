@@ -28,6 +28,18 @@ export default defineConfig([
 		// No `banner` here: src/mcp/bin.ts already starts with a shebang and tsup
 		// preserves it. Adding one emits it twice, which is a syntax error.
 	},
+	// The plain-HTML proxy — loaded by the bin only for `proxy`, so the MCP server
+	// above stays dependency-free. It never loads Vite: the host app has none.
+	{
+		entry: { proxy: 'src/proxy/cli.ts' },
+		format: ['esm'],
+		target: 'node18',
+		platform: 'node',
+		clean: false,
+		dts: false,
+		shims: true,
+		external: ['vite', 'svelte', 'svelte/compiler', 'postcss', 'magic-string']
+	},
 	// The browser overlay — a single self-contained IIFE the plugin injects into the
 	// page in dev. Bundles everything so the host page needs no module resolution.
 	{
