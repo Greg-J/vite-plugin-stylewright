@@ -127,10 +127,12 @@ export const INSTRUCTIONS =
 	'To receive requests you must call stylewright_watch — nothing is pushed to you. If the user says ' +
 	'anything like "watch for Stylewright edits", call stylewright_watch immediately and keep the loop ' +
 	'going: claim → edit → stylewright_report(done) → claim again.\n\n' +
-	'Svelte + Vite apps get the overlay from the Vite plugin. For any other app that serves HTML, call ' +
-	'stylewright_attach with the app\'s running dev-server URL and its CSS sources when the user asks for ' +
-	'Stylewright there, or when stylewright_watch finds no dev server; then give the user the URL it returns. ' +
-	'Do all of it yourself: the user never has to run a command for Stylewright.';
+	'Svelte + Vite apps get the overlay from the Vite plugin. Any other app that serves HTML (server-rendered ' +
+	'pages, a Worker under wrangler dev) gets it from stylewright_attach. Whenever you start a local dev server ' +
+	'for such an app, or point the user at one, call stylewright_attach with its URL and CSS sources and give ' +
+	'the user the URL it returns in place of the app\'s own, without being asked: that is how Stylewright is ' +
+	'there whenever the app runs. Do the same when the user asks for Stylewright or stylewright_watch finds no ' +
+	'dev server. Do all of it yourself; the user never runs a command for Stylewright.';
 
 /** The proxy bundle, loaded only when an agent attaches, so this server stays
  *  dependency-free: dist/proxy.js beside the built server, or the TypeScript

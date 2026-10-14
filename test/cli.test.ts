@@ -28,9 +28,11 @@ describe('the MCP server\'s instructions', () => {
 		expect(INSTRUCTIONS.startsWith('Stylewright connects this session')).toBe(true);
 		expect(INSTRUCTIONS).toContain('stylewright_watch');
 	});
-	it('tell an agent to attach to an app that is not Svelte + Vite, and to do it itself', () => {
+	it('tell an agent to attach whenever it starts or hands out a dev server for a plain-HTML app', () => {
 		expect(INSTRUCTIONS).toContain('stylewright_attach');
-		expect(INSTRUCTIONS).toContain('the user never has to run a command');
+		expect(INSTRUCTIONS).toContain('Whenever you start a local dev server');
+		expect(INSTRUCTIONS).toContain('without being asked');
+		expect(INSTRUCTIONS).toContain('the user never runs a command');
 	});
 });
 

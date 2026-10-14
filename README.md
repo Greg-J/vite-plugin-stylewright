@@ -295,12 +295,11 @@ stylewright({ ai: false })   // no tab, no routes, no lockfile
 
 For an app whose pages are HTML built on the server: a Cloudflare Worker under
 `wrangler dev`, Express, Rails, anything that is not Svelte served by Vite.
-Nothing is installed in the app and nothing changes in your routine. In a session
-in that project, ask your agent for Stylewright the way you would anywhere
-("watch for Stylewright edits"). The Stylewright MCP server's `stylewright_attach`
-tool puts the overlay in front of the app's running dev server, and the agent
-gives you a URL to open in place of the app's own. It lasts as long as that
-session.
+Nothing is installed in the app and nothing changes in your routine. Whenever
+your agent starts the app's dev server for you (or you ask it for Stylewright),
+it uses the Stylewright MCP server's `stylewright_attach` tool to put the
+overlay in front of that server, and gives you a URL to open in place of the
+app's own. The overlay lasts as long as that agent session.
 
 The agent also chooses the CSS sources, which are the only files the overlay
 may write, by reading the project. A source is a `.css` file, or a JS/TS file
