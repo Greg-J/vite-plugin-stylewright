@@ -1,7 +1,7 @@
 // What an agent reads to run Stylewright on a plain-HTML app: the MCP server's
-// instructions, the request it is handed, and the bin's `proxy` command. The
-// usual operator is an agent following a person's instruction, so this text is
-// the interface.
+// instructions, the request it is handed, and the bin's `proxy` command (for
+// scripts; agents attach through the MCP tool). The usual operator is an agent
+// following a person's instruction, so this text is the interface.
 
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cliCommand } from '../src/shared/cli.js';
-import { serverInstructions, renderRequest } from '../src/mcp/server.js';
+import { INSTRUCTIONS, renderRequest } from '../src/mcp/server.js';
 import type { SwAiRequest } from '../src/shared/protocol.js';
 
 describe('cliCommand', () => {
@@ -23,17 +23,14 @@ describe('cliCommand', () => {
 	});
 });
 
-describe('serverInstructions', () => {
-	const text = serverInstructions('node /x/dist/mcp.js');
-	it('still leads with the watch loop', () => {
-		expect(text.startsWith('Stylewright connects this session')).toBe(true);
-		expect(text).toContain('stylewright_watch');
+describe('the MCP server\'s instructions', () => {
+	it('still lead with the watch loop', () => {
+		expect(INSTRUCTIONS.startsWith('Stylewright connects this session')).toBe(true);
+		expect(INSTRUCTIONS).toContain('stylewright_watch');
 	});
-	it('tells an agent how to start the proxy for an app that is not Svelte + Vite', () => {
-		expect(text).toContain('node /x/dist/mcp.js proxy --target <app url> --root <project dir> --css <source>');
-		expect(text).toContain('in the background');
-		expect(text).toContain('path/file.js#NAME');
-		expect(text).toContain('node /x/dist/mcp.js proxy --help');
+	it('tell an agent to attach to an app that is not Svelte + Vite, and to do it itself', () => {
+		expect(INSTRUCTIONS).toContain('stylewright_attach');
+		expect(INSTRUCTIONS).toContain('the user never has to run a command');
 	});
 });
 
@@ -68,7 +65,7 @@ describe('the built bin', () => {
 	it.skipIf(!built)('prints proxy help an agent can follow', () => {
 		const r = run('proxy', '--help');
 		expect(r.status).toBe(0);
-		for (const s of ['--target <url>', '--css <source>', 'path/to/file.js#NAME', 'in the background', '--root <dir>']) expect(r.stdout).toContain(s);
+		for (const s of ['--target <url>', '--css <source>', 'path/to/file.js#NAME', '--root <dir>']) expect(r.stdout).toContain(s);
 	});
 
 	it.skipIf(!built)('fails with an instruction, not a stack trace', () => {

@@ -114,10 +114,10 @@ export async function discover(cwd: string): Promise<Discovered | null> {
 /** What the agent is told when there is nothing to connect to. Actionable, and
  *  specific about the two things that are actually different from "it's broken". */
 export const NO_SERVER_MESSAGE =
-	'No running Vite dev server with Stylewright was found for this project.\n' +
-	'  • Start it with `npm run dev` (or your project\'s dev script), then call this tool again.\n' +
-	'  • Not a Svelte + Vite app? Start the Stylewright proxy in front of it (see this server\'s\n' +
-	'    instructions, or `proxy --help`) with --root set to this project.\n' +
+	'No running Stylewright dev server was found for this project.\n' +
+	'  • Svelte + Vite: start the dev server (`npm run dev` or the project\'s dev script), then call this tool again.\n' +
+	'  • Any other app that serves HTML: start its dev server if it is not running, then call\n' +
+	'    stylewright_attach with its URL and CSS sources. Do it yourself; do not ask the user to run anything.\n' +
 	'  • If the dev server runs in a container or under another user, set STYLEWRIGHT_URL and\n' +
 	'    STYLEWRIGHT_TOKEN (both are in ~/.stylewright/servers/ on the machine running Vite).';
 

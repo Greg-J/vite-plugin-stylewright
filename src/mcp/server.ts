@@ -9,11 +9,13 @@
 // can tell the session is alive, and relays claims and reports.
 
 import { createInterface } from 'node:readline';
-import { basename } from 'node:path';
+import { basename, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { discover, NO_SERVER_MESSAGE, ambiguousMessage, AmbiguousServers, type Discovered } from './discover.js';
 import { vendorForClient, VENDORS } from '../shared/vendors.js';
 import type { SwAgentClaimResponse, SwAiRequest } from '../shared/protocol.js';
-import { cliCommand } from '../shared/cli.js';
+import type { Attached } from '../proxy/attach.js';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const DEFAULT_PROTOCOL = PROTOCOL_VERSIONS[0];
@@ -102,25 +104,43 @@ const WATCH_DESCRIPTION =
 	'touched. If you must ask the user something, call stylewright_report with status "needs_input" ' +
 	'FIRST, then ask in this session.';
 
+const ATTACH_DESCRIPTION =
+	'Put the Stylewright overlay on a running app that is NOT Svelte + Vite: server-rendered HTML such as ' +
+	'a Cloudflare Worker under wrangler dev, Express or Rails. (Svelte + Vite apps get it from the Vite ' +
+	'plugin, and stylewright_watch finds those on its own.) Nothing is installed in the project and nothing ' +
+	'is left running: the overlay lives as long as this session.\n\n' +
+	'Make sure the app\'s own dev server is running, then pass its URL as target, and every CSS source the ' +
+	'overlay may edit as css. These are the only files it will ever write. A source is a .css file, or ' +
+	'path/to/file.js#NAME for CSS held in a template literal assigned as `const NAME = `...`` with no ${...} ' +
+	'inside; search the project for such literals and include each one its pages use.\n\n' +
+	'Returns the URL to give the user: they open it instead of the app\'s own and find the overlay there. ' +
+	'Then call stylewright_watch as usual. Call this again to change the sources.';
+
 /**
- * Read by every session that registers this server, so the proxy paragraph is
- * how an agent learns Stylewright works on apps that are not Svelte + Vite —
- * with the command that runs on THIS machine (a checkout has no npx name yet).
+ * Read by every session that registers this server. The last paragraph is how an
+ * agent learns Stylewright works on apps that are not Svelte + Vite — and that it,
+ * not the user, does what that takes.
  */
-export function serverInstructions(cmd: string = cliCommand(import.meta.url)): string {
-	return (
-		'Stylewright connects this session to the user\'s running app in the browser. When they select an ' +
-		'element in the Stylewright overlay and type an instruction, it arrives here as a request.\n\n' +
-		'To receive requests you must call stylewright_watch — nothing is pushed to you. If the user says ' +
-		'anything like "watch for Stylewright edits", call stylewright_watch immediately and keep the loop ' +
-		'going: claim → edit → stylewright_report(done) → claim again.\n\n' +
-		'Svelte + Vite apps get the overlay from the Vite plugin. For any other app that serves HTML ' +
-		'(server-rendered pages, a Worker under wrangler dev), start the app\'s own dev server, then run ' +
-		`\`${cmd} proxy --target <app url> --root <project dir> --css <source> ...\` in the background and ` +
-		'give the user the URL it prints. Each --css is a file the overlay may edit: path/styles.css, or ' +
-		'path/file.js#NAME for CSS held in a `const NAME = `...`` template literal (no ${...} inside). ' +
-		`Run \`${cmd} proxy --help\` for details.`
-	);
+export const INSTRUCTIONS =
+	'Stylewright connects this session to the user\'s running app in the browser. When they select an ' +
+	'element in the Stylewright overlay and type an instruction, it arrives here as a request.\n\n' +
+	'To receive requests you must call stylewright_watch — nothing is pushed to you. If the user says ' +
+	'anything like "watch for Stylewright edits", call stylewright_watch immediately and keep the loop ' +
+	'going: claim → edit → stylewright_report(done) → claim again.\n\n' +
+	'Svelte + Vite apps get the overlay from the Vite plugin. For any other app that serves HTML, call ' +
+	'stylewright_attach with the app\'s running dev-server URL and its CSS sources when the user asks for ' +
+	'Stylewright there, or when stylewright_watch finds no dev server; then give the user the URL it returns. ' +
+	'Do all of it yourself: the user never has to run a command for Stylewright.';
+
+/** The proxy bundle, loaded only when an agent attaches, so this server stays
+ *  dependency-free: dist/proxy.js beside the built server, or the TypeScript
+ *  source under the test runner. */
+async function loadProxy(): Promise<typeof import('../proxy/cli.js')> {
+	for (const rel of ['./proxy.js', '../proxy/cli.ts']) {
+		const url = new URL(rel, import.meta.url);
+		if (existsSync(fileURLToPath(url))) return import(url.href);
+	}
+	throw new Error('the Stylewright proxy bundle (dist/proxy.js) is missing — the package install is incomplete');
 }
 
 export class StylewrightMcpServer {
@@ -147,6 +167,11 @@ export class StylewrightMcpServer {
 	private clientName = 'MCP client';
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private reconnectDelay = 2_000;
+	/** The overlay this session put on a plain-HTML app (stylewright_attach). */
+	private attached: Attached | null = null;
+	/** Where discovery starts: the attached project's root once there is one, so
+	 *  a root other than our working directory still finds its own server. */
+	private discoverFrom: string | null = null;
 
 	constructor(out: (s: string) => void = (s) => process.stdout.write(s)) {
 		this.out = out;
@@ -233,7 +258,7 @@ export class StylewrightMcpServer {
 			// version the installed package never had makes "which build am I on"
 			// unanswerable at the one moment you need it answered.
 			serverInfo: { name: 'stylewright', version: '0.2.0' },
-			instructions: serverInstructions()
+			instructions: INSTRUCTIONS
 		});
 
 		// Register with the dev server AFTER replying, so a slow or absent dev
@@ -247,7 +272,7 @@ export class StylewrightMcpServer {
 		const cwd = process.cwd();
 		this.lastDiscoveryError = null;
 		try {
-			this.dev = await discover(cwd);
+			this.dev = await discover(this.discoverFrom ?? cwd);
 		} catch (err) {
 			this.dev = null;
 			this.lastDiscoveryError = err instanceof AmbiguousServers ? ambiguousMessage(err.roots) : String(err);
@@ -360,6 +385,8 @@ export class StylewrightMcpServer {
 		if (this.dev && this.sessionId) {
 			try { await this.post('/bye', { sessionId: this.sessionId }, 2000); } catch { /* best effort */ }
 		}
+		// The overlay this session attached goes with it.
+		if (this.attached) { const a = this.attached; this.attached = null; await a.close().catch(() => undefined); }
 	}
 
 	// ---------- broker HTTP ----------
@@ -434,6 +461,23 @@ export class StylewrightMcpServer {
 					}
 				},
 				{
+					name: 'stylewright_attach',
+					description: ATTACH_DESCRIPTION,
+					inputSchema: {
+						type: 'object',
+						properties: {
+							target: { type: 'string', description: 'URL of the app\'s own running dev server, e.g. http://127.0.0.1:8787.' },
+							css: {
+								type: 'array',
+								items: { type: 'string' },
+								description: 'Every CSS source the overlay may edit: path/to/styles.css, or path/to/file.js#NAME for a template literal. Relative to root.'
+							},
+							root: { type: 'string', description: 'Project root. Default: this session\'s working directory.' }
+						},
+						required: ['target', 'css']
+					}
+				},
+				{
 					name: 'stylewright_report',
 					description:
 						'Report progress on a Stylewright request back to the browser overlay. The overlay shows ONLY ' +
@@ -475,6 +519,9 @@ export class StylewrightMcpServer {
 	private async onToolsCall(msg: Rpc): Promise<void> {
 		const name = String(msg.params?.name || '');
 		const args = msg.params?.arguments || {};
+
+		// Attaching is how a plain-HTML app GETS a server, so it cannot wait for one.
+		if (name === 'stylewright_attach') return this.callAttach(msg.id, args);
 
 		if (!(await this.ensureRegistered())) {
 			this.toolResult(msg.id, this.noServerText(), true);
@@ -616,6 +663,62 @@ export class StylewrightMcpServer {
 		} catch (err) {
 			this.toolResult(id, `Could not reach the Stylewright dev server: ${String(err)}`, true);
 		}
+	}
+
+	/**
+	 * Put the overlay on a plain-HTML app: start the proxy in this process (so it
+	 * ends with the session), then register with it like any other dev server.
+	 */
+	private async callAttach(id: number | string | undefined, args: Record<string, unknown>): Promise<void> {
+		const root = resolve(typeof args.root === 'string' && args.root ? args.root : process.cwd());
+		if (!this.attached) {
+			// A Vite dev server, or an overlay another session attached, already
+			// covers this project: send the user there instead of starting a second.
+			let existing: Discovered | null = null;
+			try { existing = await discover(root); } catch { /* ambiguous — attach our own */ }
+			if (existing) {
+				await this.ensureRegistered();
+				this.toolResult(id, `Stylewright is already running for this project. Give the user this URL to open: ${existing.origin}/`);
+				return;
+			}
+		}
+
+		let proxy: Awaited<ReturnType<typeof loadProxy>>;
+		try { proxy = await loadProxy(); } catch (err) { this.toolResult(id, String((err as Error).message), true); return; }
+		if (this.attached) {
+			// Called again to change the sources or the target: replace, don't stack.
+			const old = this.attached;
+			this.attached = null;
+			if (this.dev) this.forgetServer();
+			await old.close().catch(() => undefined);
+		}
+		try {
+			this.attached = await proxy.attach({ target: args.target, css: args.css, root, warn: (l) => this.warn(l) });
+			this.discoverFrom = this.attached.root;
+		} catch (err) {
+			this.toolResult(id, String((err as Error).message), true);
+			return;
+		}
+
+		const a = this.attached;
+		const connected = await this.ensureRegistered();
+		const lines = [
+			`Stylewright is on ${a.target} for ${a.root}.`,
+			``,
+			`Give the user this URL to open instead of the app's own: ${a.url}`,
+			`The overlay is on every page there, and sign-in works as it does on the app's port.`,
+			``,
+			`It may write only: ${a.sources.map((s) => s.key).join(', ')}.`,
+			`It runs until this session ends. Call stylewright_attach again to change the sources.`
+		];
+		if (!(await proxy.reachable(a.target))) {
+			lines.push(``, `Nothing answers at ${a.target} yet: start the app's dev server, or the user will see an error page.`);
+		}
+		if (connected) {
+			lines.push(``, `This session is connected to it. Requests reach it once the user links it in the overlay ` +
+				`(Ask AI tab, the session chip) — that is their one click, not a command. Call stylewright_watch to receive them.`);
+		}
+		this.toolResult(id, lines.join('\n'));
 	}
 
 	private async callListPending(id: number | string | undefined): Promise<void> {

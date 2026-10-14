@@ -294,35 +294,34 @@ stylewright({ ai: false })   // no tab, no routes, no lockfile
 ## Plain-HTML mode
 
 For an app whose pages are HTML built on the server: a Cloudflare Worker under
-`wrangler dev`, Express, Rails, anything that is not Svelte served by Vite. The
-app changes in no way. Stylewright runs as a small proxy in front of its dev
-server, and you open the proxy's URL instead of the app's.
+`wrangler dev`, Express, Rails, anything that is not Svelte served by Vite.
+Nothing is installed in the app and nothing changes in your routine. In a session
+in that project, ask your agent for Stylewright the way you would anywhere
+("watch for Stylewright edits"). The Stylewright MCP server's `stylewright_attach`
+tool puts the overlay in front of the app's running dev server, and the agent
+gives you a URL to open in place of the app's own. It lasts as long as that
+session.
+
+The agent also chooses the CSS sources, which are the only files the overlay
+may write, by reading the project. A source is a `.css` file, or a JS/TS file
+plus the name of the template literal that holds the CSS:
+
+```js
+// src/lib/html.js  →  src/lib/html.js#STYLE
+export const STYLE = `
+  .btn { color: #4fa878; }
+`;
+```
+
+### From a script
+
+The same thing as a command, for scripts and for agents without the MCP server:
 
 ```bash
 npx vite-plugin-stylewright proxy \
   --target http://127.0.0.1:8787 \
   --css src/lib/html.js#STYLE \
-  --css src/lib/workspace-style.js#WORKSPACE_STYLE \
   --css public/app.css
-```
-
-```
-[stylewright] proxy ready
-  open    http://127.0.0.1:5180/
-  app     http://127.0.0.1:8787
-  writes  src/lib/html.js#STYLE
-          ...
-```
-
-Every `--css` is a source the overlay may edit, and they are the only files it
-will ever write. A source is either a `.css` file, or a JS/TS file plus the name
-of the template literal that holds the CSS:
-
-```js
-// src/lib/html.js  →  --css src/lib/html.js#STYLE
-export const STYLE = `
-  .btn { color: #4fa878; }
-`;
 ```
 
 | Option | |
@@ -330,14 +329,8 @@ export const STYLE = `
 | `--target <url>` | The app's own dev server. Required. |
 | `--css <source>` | `file.css` or `file.js#NAME`. Repeat for each. Required. |
 | `--root <dir>` | Project root; `--css` paths are relative to it. Default: the current directory. |
-| `--port <n>` | Where the proxy listens, on `127.0.0.1` only. Default: `5180`. |
+| `--port <n>` | Where it listens, on `127.0.0.1` only. Default: the first free port from `5180`. |
 | `--no-ai`, `--no-fonts` | As `ai: false` and `fonts: false` on the plugin. |
-
-`proxy --help` says all of this too. It is written to be followed by an agent,
-which is the usual way this gets started: ask yours to "put Stylewright on this
-app" and the Stylewright MCP server's instructions tell it the command, with the
-path that works on your machine. It finds the template literals by reading the
-project.
 
 ### How it works
 
@@ -356,7 +349,8 @@ project.
   the source's old CSS for the new in the page's own `<style>`. The app's
   server picks up the file change the way it always does, and a reload shows
   what it now sends.
-- **The page itself.** Every request is forwarded with the app's own `Host`,
+- **The page itself.** The overlay runs inside the MCP server's process (or the
+  `proxy` command's) as a proxy to the app. Every request is forwarded with the app's own `Host`,
   and an `Origin`/`Referer` naming the proxy is rewritten to name the app, so
   sign-in cookies and same-origin checks behave as they do on the app's port.
   WebSockets are tunnelled. The overlay goes into HTML as an inline `<script>`,
@@ -370,11 +364,10 @@ most specific rule. `context.styleRules` holds the rules that style the element,
 each with an `origin` naming its source (`file.js#NAME`). The agent is told the
 markup lives elsewhere and to find it by the element's classes.
 
-An MCP server registered from an older version (0.1.x) still finds a running
-proxy and hands its requests over. What it cannot do is tell an agent that the
-proxy exists, or how to start it; that arrives with 0.2.0. Until then, register
-the server from a checkout as described under
-[developing the plugin itself](#if-youre-developing-the-plugin-itself).
+Attaching needs the MCP server from 0.2.0 on. A session running 0.1.x still
+serves an overlay that is already up, but cannot attach one. There is nothing to
+update by hand: `npx vite-plugin-stylewright mcp` checks for a newer published
+version each time an agent starts it.
 
 ### Limits
 
@@ -461,7 +454,7 @@ reach `localhost` by URL. The API is therefore gated, not merely obscure:
   with `stylewright({ fonts: false })`. There is no telemetry.
 
 Dev-only throughout: `apply: 'serve'`, so none of it can reach a production build.
-The proxy is a separate command with nothing in any build either.
+Plain-HTML mode's proxy runs inside the MCP server or the `proxy` command, never in a build.
 
 One thing to be aware of rather than protected from: an **Ask AI** request includes the
 selected element's markup and text, so if you are previewing untrusted content (a page

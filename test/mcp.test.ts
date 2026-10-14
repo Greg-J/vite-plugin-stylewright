@@ -67,16 +67,16 @@ describe('JSON-RPC surface', () => {
 		await h.server.shutdown();
 	});
 
-	it('lists exactly the three tools, with a watch description that teaches the loop', async () => {
+	it('lists exactly the four tools, with a watch description that teaches the loop', async () => {
 		const h = harness();
 		await h.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
 		const tools = h.byId(1)!.result.tools as { name: string; description: string }[];
-		expect(tools.map((t) => t.name)).toEqual(['stylewright_watch', 'stylewright_report', 'stylewright_list_pending']);
+		expect(tools.map((t) => t.name)).toEqual(['stylewright_watch', 'stylewright_attach', 'stylewright_report', 'stylewright_list_pending']);
 		const watch = tools[0].description;
 		expect(watch).toContain('claim → edit → report(done) → claim again');
 		expect(watch).toContain('styleRules');
 		// report's description must state the honesty rule, or agents will skip it.
-		expect(tools[1].description).toContain('never guesses');
+		expect(tools[2].description).toContain('never guesses');
 		await h.server.shutdown();
 	});
 
@@ -106,6 +106,9 @@ describe('JSON-RPC surface', () => {
 		const r = h.byId(1)!.result;
 		expect(r.isError).toBe(true);
 		expect(r.content[0].text).toContain('npm run dev');
+		// A plain-HTML app is not a dead end: the agent is told to attach, itself.
+		expect(r.content[0].text).toContain('stylewright_attach');
+		expect(r.content[0].text).toContain('do not ask the user to run anything');
 		expect(r.content[0].text).toContain('STYLEWRIGHT_URL');
 		await h.server.shutdown();
 		if (prev.url) process.env.STYLEWRIGHT_URL = prev.url;

@@ -1,17 +1,17 @@
 // `vite-plugin-stylewright proxy` — Stylewright for apps that are not Svelte +
-// Vite. Loaded on demand by the bin (src/mcp/bin.ts), so the MCP server it
-// shares a binary with stays free of postcss and friends.
+// Vite, from a shell. The usual path is the MCP server's `stylewright_attach`
+// tool, which runs the same attach() in-process; this is for scripts and for
+// agents without the MCP server.
 //
-// The usual operator is an agent following a person's instruction, so the help
-// text and every error say what to do next rather than what went wrong.
+// This file is the dist/proxy.js entry, loaded on demand by the bin and the MCP
+// server, so the MCP server stays free of postcss and friends.
 
-import { resolve } from 'node:path';
-import { existsSync, statSync } from 'node:fs';
-import { startProxy, PROXY_HOST } from './proxy.js';
-import { parseSourceSpecs, SourceSpecError } from '../server/sources.js';
+import { PROXY_HOST } from './proxy.js';
+import { attach, DEFAULT_PORT } from './attach.js';
+import { SourceSpecError } from '../server/sources.js';
 import { cliCommand } from '../shared/cli.js';
 
-export const DEFAULT_PORT = 5180;
+export { attach, AttachError } from './attach.js';
 
 export function proxyHelp(cmd: string): string {
 	return `${cmd} proxy — Stylewright for apps that are not Svelte + Vite
@@ -35,13 +35,17 @@ Required:
 
 Options:
   --root <dir>     Project root; --css paths are relative to it. Default: cwd.
-  --port <n>       Port to listen on, on ${PROXY_HOST} only. Default: ${DEFAULT_PORT}.
+  --port <n>       Port to listen on, on ${PROXY_HOST} only. Default: the first
+                   free one from ${DEFAULT_PORT}.
   --no-ai          No Ask AI tab, routes or agent registration.
   --no-fonts       Don't load IBM Plex from Google Fonts for the overlay.
 
-It runs until stopped (Ctrl-C or SIGTERM). Start it in the background and give
-the user the "open" URL it prints. Sign-in cookies work through it as they do on
-the app's own port.
+It runs until stopped (Ctrl-C or SIGTERM). Sign-in cookies work through it as
+they do on the app's own port.
+
+An agent with the Stylewright MCP server does not need this command: its
+stylewright_attach tool does the same thing inside the MCP server, and the
+overlay ends with the agent's session.
 
 A saved edit is written to the source file and applied to the open page at once.
 The app's server picks up the file change the way it always does; a reload shows
@@ -93,45 +97,39 @@ export async function runProxyCli(argv: string[]): Promise<void> {
 	try { args = parseArgs(argv); } catch (e) { return die(String((e as Error).message)); }
 	if (args.help) { out(proxyHelp(cmd)); return; }
 
-	if (!args.target) die('--target is required: the URL of the app\'s own dev server, e.g. --target http://127.0.0.1:8787');
-	let target: URL;
-	try { target = new URL(args.target!); } catch { return die(`--target ${args.target} is not a URL — e.g. http://127.0.0.1:8787`); }
-
-	const root = resolve(args.root || process.cwd());
-	if (!existsSync(root) || !statSync(root).isDirectory()) die(`--root ${root} is not a directory`);
-
-	const port = args.port === undefined ? DEFAULT_PORT : Number(args.port);
-	if (!Number.isInteger(port) || port < 0 || port > 65535) die(`--port ${args.port} is not a port number`);
-
-	let sources;
-	try { sources = parseSourceSpecs(root, args.css); } catch (e) { return die(String((e as Error).message)); }
-
 	let running;
 	try {
-		running = await startProxy({ target, root, sources, port, ai: args.ai, fonts: args.fonts, warn: err });
+		running = await attach({ target: args.target, css: args.css, root: args.root, port: args.port, ai: args.ai, fonts: args.fonts, warn: err });
 	} catch (e) {
-		const code = (e as NodeJS.ErrnoException).code;
-		if (code === 'EADDRINUSE') return die(`port ${port} is in use (another proxy already running?) — pass --port <n> to pick another`);
-		return die(String((e as Error).message));
+		// attach() names the field; on the command line it is a flag.
+		return die(String((e as Error).message).replace(/^(target|root|port) /, '--$1 '));
 	}
 
 	out('[stylewright] proxy ready');
 	out(`  open    ${running.url}`);
-	out(`  app     ${target.origin}`);
-	out(`  root    ${root}`);
-	sources.forEach((s, i) => out(`  ${i ? '       ' : 'writes '} ${s.key}`));
+	out(`  app     ${running.target}`);
+	out(`  root    ${running.root}`);
+	running.sources.forEach((s, i) => out(`  ${i ? '       ' : 'writes '} ${s.key}`));
 	out(args.ai
-		? `  ask ai  on — an agent session under ${root} picks requests up once told "watch for Stylewright edits"`
+		? `  ask ai  on — an agent session under ${running.root} picks requests up once told "watch for Stylewright edits"`
 		: '  ask ai  off');
 
 	// Say now, not on the first page load, if the app is not up yet.
-	try {
-		await fetch(target.origin, { method: 'HEAD', signal: AbortSignal.timeout(2000) });
-	} catch {
-		err(`[stylewright] nothing answered at ${target.origin} yet — start the app's dev server; requests will be forwarded once it is up`);
+	if (!(await reachable(running.target))) {
+		err(`[stylewright] nothing answered at ${running.target} yet — start the app's dev server; requests will be forwarded once it is up`);
 	}
 
 	const stop = (): void => { void running.close().then(() => process.exit(0)); };
 	process.once('SIGINT', stop);
 	process.once('SIGTERM', stop);
+}
+
+/** Does anything answer at the app's origin? Used to warn, never to refuse. */
+export async function reachable(origin: string): Promise<boolean> {
+	try {
+		await fetch(origin, { method: 'HEAD', signal: AbortSignal.timeout(2000) });
+		return true;
+	} catch {
+		return false;
+	}
 }

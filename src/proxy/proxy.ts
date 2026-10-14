@@ -127,8 +127,9 @@ export async function startProxy(opts: ProxyOptions): Promise<RunningProxy> {
 
 	const plain = new PlainSources(root, opts.sources);
 	const server = http.createServer();
-	const ai = opts.ai ? mountAi({ root, httpServer: server, isSourceFile: plain.isSourceFile }) : undefined;
-	const api = createStylewrightMiddleware(root, ai, plain);
+	// Mounted once listening succeeds, so a port that turns out to be taken leaves
+	// no broker, registry entry or exit handler behind.
+	let api: Connect.NextHandleFunction | null = null;
 	const targetPort = Number(target.port || 80);
 
 	const forward = (req: http.IncomingMessage, res: http.ServerResponse): void => {
@@ -196,6 +197,7 @@ export async function startProxy(opts: ProxyOptions): Promise<RunningProxy> {
 			res.end('Forbidden host');
 			return;
 		}
+		if (!api) { res.writeHead(503); res.end(); return; }
 		Promise.resolve(api(req as Connect.IncomingMessage, res, () => forward(req, res))).catch((err: unknown) => {
 			if (!res.headersSent) { res.statusCode = 500; res.end(String(err)); } else res.destroy();
 		});
@@ -229,6 +231,8 @@ export async function startProxy(opts: ProxyOptions): Promise<RunningProxy> {
 		server.once('error', reject);
 		server.listen(opts.port, PROXY_HOST, () => { server.off('error', reject); resolve(); });
 	});
+	const ai = opts.ai ? mountAi({ root, httpServer: server, isSourceFile: plain.isSourceFile }) : undefined;
+	api = createStylewrightMiddleware(root, ai, plain);
 	const addr = server.address() as net.AddressInfo;
 	return {
 		url: `http://${PROXY_HOST}:${addr.port}/`,
