@@ -10,6 +10,8 @@ A dev-only Vite plugin. Click an element on the page, tweak its CSS with live pr
 
 <img src="https://raw.githubusercontent.com/Greg-J/vite-plugin-stylewright/main/docs/images/css-editor.png" alt="The Stylewright panel open beside a Svelte page, listing the parsed .btn rules from Button.svelte with editable values and colour swatches" width="900">
 
+Not Svelte, or not served by Vite? [Plain-HTML mode](#plain-html-mode) runs the same overlay in front of any server-rendered app and writes to the `.css` files and CSS template literals you name.
+
 **Status:** early alpha (`0.1.x`). The core round-trip is solid and unit-tested; the browser overlay is functional and evolving. Issues and PRs welcome.
 
 ---
@@ -289,6 +291,107 @@ heuristic that guesses. `done`, `needs_input` and the file list all come from an
 stylewright({ ai: false })   // no tab, no routes, no lockfile
 ```
 
+## Plain-HTML mode
+
+For an app whose pages are HTML built on the server: a Cloudflare Worker under
+`wrangler dev`, Express, Rails, anything that is not Svelte served by Vite. The
+app changes in no way. Stylewright runs as a small proxy in front of its dev
+server, and you open the proxy's URL instead of the app's.
+
+```bash
+npx vite-plugin-stylewright proxy \
+  --target http://127.0.0.1:8787 \
+  --css src/lib/html.js#STYLE \
+  --css src/lib/workspace-style.js#WORKSPACE_STYLE \
+  --css public/app.css
+```
+
+```
+[stylewright] proxy ready
+  open    http://127.0.0.1:5180/
+  app     http://127.0.0.1:8787
+  writes  src/lib/html.js#STYLE
+          ...
+```
+
+Every `--css` is a source the overlay may edit, and they are the only files it
+will ever write. A source is either a `.css` file, or a JS/TS file plus the name
+of the template literal that holds the CSS:
+
+```js
+// src/lib/html.js  →  --css src/lib/html.js#STYLE
+export const STYLE = `
+  .btn { color: #4fa878; }
+`;
+```
+
+| Option | |
+|---|---|
+| `--target <url>` | The app's own dev server. Required. |
+| `--css <source>` | `file.css` or `file.js#NAME`. Repeat for each. Required. |
+| `--root <dir>` | Project root; `--css` paths are relative to it. Default: the current directory. |
+| `--port <n>` | Where the proxy listens, on `127.0.0.1` only. Default: `5180`. |
+| `--no-ai`, `--no-fonts` | As `ai: false` and `fonts: false` on the plugin. |
+
+`proxy --help` says all of this too. It is written to be followed by an agent,
+which is the usual way this gets started: ask yours to "put Stylewright on this
+app" and the Stylewright MCP server's instructions tell it the command, with the
+path that works on your machine. It finds the template literals by reading the
+project.
+
+### How it works
+
+- **Which rules.** There is no component metadata to resolve an element with, so
+  a pick loads every configured source that this page actually includes. A
+  literal emitted into the page's `<style>` appears there verbatim, so its text
+  is the test. A source edited on disk since the page loaded drops out until you
+  reload. "Focus the selection" then narrows to the rules matching what you
+  picked, and each rule is labelled with the file it came from.
+- **The write-back.** The same PostCSS patcher as the Svelte path, pointed at
+  the CSS inside the literal. Escapes are processed the way JavaScript does it,
+  so the overlay shows `content: '\25b8'` where the source says `'\\25b8'`. The
+  change is then reduced to the bytes that differ and spliced into the file
+  there, and nothing else in it moves.
+- **Showing the change.** There is no HMR, so after a save the overlay swaps
+  the source's old CSS for the new in the page's own `<style>`. The app's
+  server picks up the file change the way it always does, and a reload shows
+  what it now sends.
+- **The page itself.** Every request is forwarded with the app's own `Host`,
+  and an `Origin`/`Referer` naming the proxy is rewritten to name the app, so
+  sign-in cookies and same-origin checks behave as they do on the app's port.
+  WebSockets are tunnelled. The overlay goes into HTML as an inline `<script>`,
+  and the app's headers, its Content-Security-Policy included, pass through
+  untouched.
+
+### Ask AI
+
+Works the same way. `source.file` is the source holding the picked element's
+most specific rule. `context.styleRules` holds the rules that style the element,
+each with an `origin` naming its source (`file.js#NAME`). The agent is told the
+markup lives elsewhere and to find it by the element's classes.
+
+An MCP server registered from an older version (0.1.x) still finds a running
+proxy and hands its requests over. What it cannot do is tell an agent that the
+proxy exists, or how to start it; that arrives with 0.2.0. Until then, register
+the server from a checkout as described under
+[developing the plugin itself](#if-youre-developing-the-plugin-itself).
+
+### Limits
+
+- **CSS rules only.** Colours or sizes in a `style=""` attribute, or set from
+  JavaScript, are not editable here. Ask AI can change them.
+- **Refused, not guessed.** A template literal containing `${…}` cannot be a
+  source: its CSS is only known at runtime. An edit to a declaration written
+  with a backslash escape, or a new value that would need one inside a template
+  literal (`\`, `` ` ``, `${`), is refused with a message saying so. A stylesheet
+  PostCSS cannot reprint byte-for-byte is refused before anything is written.
+- **The page must allow inline scripts.** A Content-Security-Policy without
+  `'unsafe-inline'` for scripts (or with a nonce or hash, which overrides it)
+  blocks the overlay. The proxy says so on stderr and leaves the policy alone.
+- **Local and plain.** `http://` targets only. UTF-8 HTML only; other pages pass
+  through without the overlay. A linked `.css` file is written, but the page
+  shows the change on reload rather than at once.
+
 ## Try it in 30 seconds
 
 A runnable Svelte 5 demo lives in [`playground/`](./playground):
@@ -342,10 +445,23 @@ reach `localhost` by URL. The API is therefore gated, not merely obscure:
   rather than a CSS write.
 - **The broker never writes files.** It queues text; every write is the agent's, under the
   agent's own permission and diff flow.
+- **Plain-HTML mode keeps all of the above and narrows the writes.** The proxy
+  listens on `127.0.0.1` only and applies the Host rule to every request,
+  forwarded ones included. It writes only the sources named with `--css`: the
+  overlay names a source by its key and never by a path the server would
+  resolve on its behalf. Each source passes both containment checks (lexical
+  and symlink-resolved) at startup and again on every write. A `.js` file is
+  never written outside its named literal. Any write that would put `</style` or
+  `</script` into CSS the page emits inside a `<style>` is refused. A save that
+  touches several sources is computed and checked in full before any file is
+  written, and an id that no longer names the rule it named at load (the file
+  changed in an editor meanwhile) refuses the save instead of patching whatever
+  sits there now.
 - **One outbound request:** IBM Plex from Google Fonts, for the overlay chrome. Turn it off
   with `stylewright({ fonts: false })`. There is no telemetry.
 
 Dev-only throughout: `apply: 'serve'`, so none of it can reach a production build.
+The proxy is a separate command with nothing in any build either.
 
 One thing to be aware of rather than protected from: an **Ask AI** request includes the
 selected element's markup and text, so if you are previewing untrusted content (a page
@@ -355,7 +471,8 @@ own session.
 
 ## Limitations (alpha)
 
-- Targets **Svelte + Vite**. Element→source resolution relies on Svelte dev metadata.
+- Targets **Svelte + Vite**, where element→source resolution relies on Svelte dev metadata, and
+  any other HTML app through [plain-HTML mode](#plain-html-mode) (CSS rules only, see its limits).
 - Edits the **first rule** matching a selector; descendant/complex selectors preview approximately.
 - One `<style>` block per component (the common case).
 - Preprocessor CSS (`lang="scss"`) is located and value-edits work, but structural rewrites are out of scope.
@@ -366,7 +483,9 @@ own session.
 
 ## Roadmap
 
-- Preprocessor-based element stamping as a fallback when `__svelte_meta` is unavailable.
+- A fallback for Svelte apps where `__svelte_meta` is unavailable. Plain-HTML mode now matches an
+  element to rules without any metadata; extending that to `.svelte` `<style>` blocks is what is left.
+- Plain-HTML mode: inline `style=""` attributes, and `https://` targets.
 - Multi-`<style>` and nested-rule support.
 - Bundle IBM Plex locally so the overlay makes no outbound request at all.
 - Answer an agent's clarifying question from the overlay (needs MCP elicitation).
