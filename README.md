@@ -12,7 +12,7 @@ A dev-only Vite plugin. Click an element on the page, tweak its CSS with live pr
 
 Not Svelte, or not served by Vite? [Plain-HTML mode](#plain-html-mode) runs the same overlay in front of any server-rendered app and writes to the `.css` files and CSS template literals you name.
 
-**Status:** early alpha (`0.1.x`). The core round-trip is solid and unit-tested; the browser overlay is functional and evolving. Issues and PRs welcome.
+**Status:** early alpha (`0.2.x`). The core round-trip is solid and unit-tested; the browser overlay is functional and evolving. Issues and PRs welcome.
 
 ---
 
